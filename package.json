@@ -1,0 +1,14 @@
+{
+  "name": "solana-auto-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "@solana/web3.js": "latest",
+    "@jup-ag/api": "latest",
+    "axios": "latest",
+    "dotenv": "latest",
+    "bs58": "latest",
+    "node-telegram-bot-api": "latest"
+  }
+}
