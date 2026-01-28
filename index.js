@@ -13,96 +13,112 @@ const jupiter = createJupiterApiClient();
 const MY_ID = process.env.CHAT_ID;
 
 const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
+const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-console.log("🚀 Auto-Trader Started on Railway...");
+console.log("🚀 Auto-Trader Started with TP/SL Guard...");
 
-// 2. BUY FUNCTION (Updated with Detailed Error Reporting)
-async function buyToken(mint, amountSol = 0.05) {
+// 2. SELL FUNCTION (Back to SOL)
+async function sellToken(mint, amountTokens) {
     try {
-        console.log(`📡 Requesting quote for ${mint}...`);
-        
-        // Convert SOL to Lamports (Jupiter needs a string)
-        const amountInLamports = Math.floor(amountSol * 1e9).toString();
-
+        console.log(`📡 Selling ${mint}...`);
         const quote = await jupiter.quoteGet({
-            inputMint: "So11111111111111111111111111111111111111112",
-            outputMint: mint,
-            amount: amountInLamports,
-            slippageBps: 2000, // 20% slippage for volatile launches
+            inputMint: mint,
+            outputMint: SOL_MINT,
+            amount: amountTokens.toString(),
+            slippageBps: 2000, 
         });
 
-        if (!quote) {
-            console.log("❌ Jupiter couldn't find a route for this token yet.");
-            return;
-        }
-
         const { swapTransaction } = await jupiter.swapPost({
-            swapRequest: { 
-                quoteResponse: quote, 
-                userPublicKey: wallet.publicKey.toBase58(), 
-                wrapAndUnwrapSol: true 
-            }
+            swapRequest: { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true }
         });
 
         const transaction = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
         transaction.sign([wallet]);
+        const signature = await connection.sendRawTransaction(transaction.serialize(), { skipPreflight: true });
 
-        const signature = await connection.sendRawTransaction(transaction.serialize(), { 
-            skipPreflight: true, 
-            maxRetries: 2 
-        });
-
-        bot.sendMessage(MY_ID, `✅ SUCCESS! Bought ${mint}\nhttps://solscan.io/tx/${signature}`);
-        console.log(`✅ Trade successful: ${signature}`);
+        bot.sendMessage(MY_ID, `💰 SOLD! Exit realized.\nTx: https://solscan.io/tx/${signature}`);
     } catch (e) {
-        // Capture specific API errors from Jupiter
-        const errorData = e.response?.data ? JSON.stringify(e.response.data) : e.message;
-        console.error("🚨 Jupiter API Error:", errorData);
-        
-        // Send a simplified version to Telegram so you know what happened
-        if (errorData.includes("COULD_NOT_FIND_ANY_ROUTE")) {
-            bot.sendMessage(MY_ID, `⚠️ Trade Skipped: Token too new for Jupiter to route.`);
-        } else {
-            bot.sendMessage(MY_ID, `⚠️ Trade Failed: ${errorData.slice(0, 100)}`);
-        }
+        console.error("🚨 Sell Failed:", e.message);
     }
 }
 
-// 3. MAIN SCANNER
-connection.onLogs(RAYDIUM_ID, async ({ logs, signature, err }) => {
-    if (err || !logs.some(log => log.includes("initialize2"))) return;
+// 3. MONITORING LOOP (The Watchdog)
+async function startMonitoring(mint, entryPrice, tokenBalance) {
+    const TP_PERCENT = 1.5; // +50%
+    const SL_PERCENT = 0.7; // -30%
+    
+    bot.sendMessage(MY_ID, `👀 Monitoring ${mint.slice(0, 6)}...\nTP: +50% | SL: -30%`);
 
+    const interval = setInterval(async () => {
+        try {
+            const quote = await jupiter.quoteGet({
+                inputMint: mint,
+                outputMint: SOL_MINT,
+                amount: tokenBalance.toString(),
+                slippageBps: 50, 
+            });
+
+            const currentPrice = parseFloat(quote.outAmount) / tokenBalance;
+            const change = currentPrice / entryPrice;
+
+            if (change >= TP_PERCENT) {
+                bot.sendMessage(MY_ID, `🎯 TAKE PROFIT HIT! (+50%) Selling...`);
+                clearInterval(interval);
+                await sellToken(mint, tokenBalance);
+            } else if (change <= SL_PERCENT) {
+                bot.sendMessage(MY_ID, `📉 STOP LOSS HIT! (-30%) Selling...`);
+                clearInterval(interval);
+                await sellToken(mint, tokenBalance);
+            }
+        } catch (e) { console.log("Price check failed, retrying..."); }
+    }, 20000); // Check every 20 seconds
+}
+
+// 4. BUY FUNCTION (Triggers Watchdog)
+async function buyToken(mint, amountSol = 0.05) {
     try {
-        console.log("🔍 New Launch Detected! Checking safety...");
-        const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0 });
-        const instructions = tx?.transaction.message.instructions;
-        const raydiumIx = instructions.find(ix => ix.programId.equals(RAYDIUM_ID));
-        
-        if (!raydiumIx || !raydiumIx.accounts) return;
-        const tokenMint = raydiumIx.accounts[8].toBase58();
-
-        // 🛡️ RugCheck Safety Check
-        const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, {
-            headers: { 'User-Agent': 'Mozilla/5.0' }
+        const amountInLamports = Math.floor(amountSol * 1e9).toString();
+        const quote = await jupiter.quoteGet({
+            inputMint: SOL_MINT,
+            outputMint: mint,
+            amount: amountInLamports,
+            slippageBps: 2000,
         });
 
-        const score = rug.data.score;
-        console.log(`🛡️ Token: ${tokenMint} | Score: ${score}`);
+        const { swapTransaction } = await jupiter.swapPost({
+            swapRequest: { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true }
+        });
 
-        if (score < 500) {
-            bot.sendMessage(MY_ID, `💎 Safe Token Found: ${tokenMint}\nScore: ${score}\nAttempting to buy 0.05 SOL...`);
-            await buyToken(tokenMint);
-        } else {
-            console.log(`❌ Skipped: High Rug Score (${score})`);
-        }
+        const transaction = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
+        transaction.sign([wallet]);
+        const signature = await connection.sendRawTransaction(transaction.serialize(), { skipPreflight: true });
+
+        const tokenBalance = quote.outAmount;
+        const entryPrice = parseFloat(amountInLamports) / parseFloat(tokenBalance);
+
+        bot.sendMessage(MY_ID, `✅ BOUGHT: ${mint}\nEntry Price: ${entryPrice.toFixed(10)} SOL`);
+        
+        // 🔥 Start watching the price immediately
+        startMonitoring(mint, entryPrice, tokenBalance);
+
     } catch (e) {
-        console.log("Scanning for new launches...");
+        console.error("🚨 Buy Error:", e.message);
     }
+}
+
+// 5. SCANNER & HEARTBEAT (Same as before)
+connection.onLogs(RAYDIUM_ID, async ({ logs, signature, err }) => {
+    if (err || !logs.some(log => log.includes("initialize2"))) return;
+    try {
+        const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0 });
+        const tokenMint = tx?.transaction.message.instructions.find(ix => ix.programId.equals(RAYDIUM_ID))?.accounts[8].toBase58();
+        const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+
+        if (rug.data.score < 500) {
+            await buyToken(tokenMint);
+        }
+    } catch (e) { console.log("Scanning..."); }
 }, 'confirmed');
 
-// 4. HEARTBEAT & STARTUP
-bot.sendMessage(MY_ID, "✅ Bot Live & Scanning Solana Market!");
-
-setInterval(() => {
-    console.log("💓 Heartbeat: Bot is still scanning Solana...");
-}, 60000);
+setInterval(() => console.log("💓 Heartbeat: Still scanning..."), 60000);
+bot.sendMessage(MY_ID, "🚀 Bot Active with Auto-Sell!");
