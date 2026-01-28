@@ -1,14 +1,17 @@
 {
   "name": "solana-auto-bot",
   "version": "1.0.0",
+  "description": "Solana Sniper Bot with TP/SL",
   "main": "index.js",
-  "scripts": { "start": "node index.js" },
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
-    "@solana/web3.js": "latest",
-    "@jup-ag/api": "latest",
-    "axios": "latest",
-    "dotenv": "latest",
-    "bs58": "latest",
-    "node-telegram-bot-api": "latest"
+    "@jup-ag/api": "^6.0.21",
+    "@solana/web3.js": "^1.87.1",
+    "axios": "^1.6.0",
+    "bs58": "^5.0.0",
+    "dotenv": "^16.3.1",
+    "node-telegram-bot-api": "^0.64.0"
   }
 }
