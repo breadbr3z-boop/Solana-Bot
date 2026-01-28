@@ -9,25 +9,33 @@ require('dotenv').config();
 const connection = new Connection(process.env.RPC_URL, 'confirmed');
 const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, {polling: true});
-const jupiter = createJupiterApiClient(); // Fixed Client Init
+const jupiter = createJupiterApiClient(); 
 const MY_ID = process.env.CHAT_ID;
 
 const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 
 console.log("🚀 Auto-Trader Started on Railway...");
 
-// 2. BUY FUNCTION
-async function buyToken(mint, amountSol = 0.1) {
+// 2. BUY FUNCTION (Updated with Detailed Error Reporting)
+async function buyToken(mint, amountSol = 0.05) {
     try {
-        // Jupiter Quote
+        console.log(`📡 Requesting quote for ${mint}...`);
+        
+        // Convert SOL to Lamports (Jupiter needs a string)
+        const amountInLamports = Math.floor(amountSol * 1e9).toString();
+
         const quote = await jupiter.quoteGet({
             inputMint: "So11111111111111111111111111111111111111112",
             outputMint: mint,
-            amount: (amountSol * 1e9).toString(), // Jupiter expects a string for the amount
-            slippageBps: 1500, 
+            amount: amountInLamports,
+            slippageBps: 2000, // 20% slippage for volatile launches
         });
 
-        // Get Swap Transaction
+        if (!quote) {
+            console.log("❌ Jupiter couldn't find a route for this token yet.");
+            return;
+        }
+
         const { swapTransaction } = await jupiter.swapPost({
             swapRequest: { 
                 quoteResponse: quote, 
@@ -40,14 +48,23 @@ async function buyToken(mint, amountSol = 0.1) {
         transaction.sign([wallet]);
 
         const signature = await connection.sendRawTransaction(transaction.serialize(), { 
-            skipPreflight: true,
+            skipPreflight: true, 
             maxRetries: 2 
         });
-        
-        bot.sendMessage(MY_ID, `✅ BOUGHT NEW TOKEN: ${mint}\nTx: https://solscan.io/tx/${signature}`);
+
+        bot.sendMessage(MY_ID, `✅ SUCCESS! Bought ${mint}\nhttps://solscan.io/tx/${signature}`);
+        console.log(`✅ Trade successful: ${signature}`);
     } catch (e) {
-        console.error("Trade Failed:", e.message);
-        bot.sendMessage(MY_ID, `⚠️ Trade Failed: ${e.message}`);
+        // Capture specific API errors from Jupiter
+        const errorData = e.response?.data ? JSON.stringify(e.response.data) : e.message;
+        console.error("🚨 Jupiter API Error:", errorData);
+        
+        // Send a simplified version to Telegram so you know what happened
+        if (errorData.includes("COULD_NOT_FIND_ANY_ROUTE")) {
+            bot.sendMessage(MY_ID, `⚠️ Trade Skipped: Token too new for Jupiter to route.`);
+        } else {
+            bot.sendMessage(MY_ID, `⚠️ Trade Failed: ${errorData.slice(0, 100)}`);
+        }
     }
 }
 
@@ -64,26 +81,28 @@ connection.onLogs(RAYDIUM_ID, async ({ logs, signature, err }) => {
         if (!raydiumIx || !raydiumIx.accounts) return;
         const tokenMint = raydiumIx.accounts[8].toBase58();
 
-        // 🛡️ RugCheck Safety Check (Added User-Agent for reliability)
+        // 🛡️ RugCheck Safety Check
         const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, {
             headers: { 'User-Agent': 'Mozilla/5.0' }
         });
 
-        if (rug.data.score < 500) {
-            bot.sendMessage(MY_ID, `💎 Safe Token Found: ${tokenMint}\nRugCheck Score: ${rug.data.score}\nAttempting to buy 0.1 SOL...`);
+        const score = rug.data.score;
+        console.log(`🛡️ Token: ${tokenMint} | Score: ${score}`);
+
+        if (score < 500) {
+            bot.sendMessage(MY_ID, `💎 Safe Token Found: ${tokenMint}\nScore: ${score}\nAttempting to buy 0.05 SOL...`);
             await buyToken(tokenMint);
         } else {
-            console.log(`❌ Skipped: ${tokenMint} (Rug Score: ${rug.data.score})`);
+            console.log(`❌ Skipped: High Rug Score (${score})`);
         }
     } catch (e) {
         console.log("Scanning for new launches...");
     }
 }, 'confirmed');
 
-// Startup confirmation message
-bot.sendMessage(MY_ID, "✅ Bot successfully connected to Railway! Starting Solana market scan...");
+// 4. HEARTBEAT & STARTUP
+bot.sendMessage(MY_ID, "✅ Bot Live & Scanning Solana Market!");
 
-// 4. KEEP-ALIVE HEARTBEAT
 setInterval(() => {
     console.log("💓 Heartbeat: Bot is still scanning Solana...");
 }, 60000);
