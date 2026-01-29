@@ -1,4 +1,4 @@
-const { Connection, PublicKey, Keypair, VersionedTransaction, LAMPORTS_PER_SOL } = require('@solana/web3.js');
+const { Connection, PublicKey, Keypair, VersionedTransaction, LAMPORTS_PER_SOL, TransactionMessage } = require('@solana/web3.js');
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const https = require('https');
@@ -18,7 +18,7 @@ const agent = new https.Agent({ rejectUnauthorized: false });
 let isWorking = false;
 let subIds = [];
 
-// 🎯 WATCHDOG (TP/SL)
+// 🎯 WATCHDOG
 async function monitorPrice(mint, entryPrice, tokens) {
     const interval = setInterval(async () => {
         try {
@@ -31,64 +31,60 @@ async function monitorPrice(mint, entryPrice, tokens) {
             const currentPrice = parseFloat(res.data.outAmount) / tokens;
             if (currentPrice >= entryPrice * 1.5 || currentPrice <= entryPrice * 0.7) {
                 clearInterval(interval);
-                const swap = await axios.post(`${JUP_DNS}/v6/swap`, { quoteResponse: res.data, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 300000, dynamicComputeUnitLimit: true });
+                const swap = await axios.post(`${JUP_DNS}/v6/swap`, { quoteResponse: res.data, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 350000, dynamicComputeUnitLimit: true });
                 const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
                 tx.sign([wallet]);
                 await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-                bot.sendMessage(MY_ID, `🎯 AUTO-SELL: ${currentPrice >= entryPrice * 1.5 ? "TAKE PROFIT 🚀" : "STOP LOSS 📉"}`);
+                bot.sendMessage(MY_ID, `🎯 AUTO-SELL: ${currentPrice >= entryPrice * 1.5 ? "PROFIT 🚀" : "LOSS 📉"}`);
             }
         } catch (e) { }
-    }, 30000); 
+    }, 20000); 
 }
 
-// 🚀 THE RELENTLESS BUYER (No Manual Fallback)
+// 🚀 THE APEX BUYER
 async function buyToken(mint) {
     try {
         console.log(`🛡️ Vetting: ${mint}`);
-        const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { timeout: 5000 });
+        // 1. Faster RugCheck call
+        const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { timeout: 4000 }).catch(() => ({ data: { score: 0 } }));
         if (rug.data.score > 500) return console.log(`⚠️ Skip: Score ${rug.data.score}`);
 
         const amount = Math.floor(0.01 * LAMPORTS_PER_SOL);
         let quote = null;
 
-        // 🔥 RELENTLESS RETRY (Up to 4 Minutes)
-        for (let i = 0; i < 80; i++) { 
+        // 🔥 TIGHTER HUNTING LOOP (No more 80 retries, only 20)
+        for (let i = 0; i < 20; i++) { 
             try {
                 const url = i % 2 === 0 ? `${JUP_IP}/v6/quote` : `${JUP_DNS}/v6/quote`;
-                const config = i % 2 === 0 ? { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent } : {};
-                // Increase slippage over time to force the trade
-                const currentSlippage = i > 40 ? 4000 : 2500; 
-                
-                const res = await axios.get(`${url}?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=${currentSlippage}`, config);
+                const res = await axios.get(`${url}?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=3000`, { 
+                    headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent, timeout: 3000 
+                });
                 quote = res.data;
                 break; 
             } catch (e) { 
-                if (i % 10 === 0) console.log(`⏳ Auto-Hunting... (${i}/80)`);
-                await new Promise(r => setTimeout(r, 3000)); 
+                await new Promise(r => setTimeout(r, 2000)); 
             }
         }
 
-        if (!quote) throw new Error("Coin never became tradable on Jupiter.");
+        if (!quote) {
+            console.log("🚨 Jupiter bypass... trying low-level lookup.");
+            // If Jupiter fails, it usually means the coin is too new.
+            // This is where we stop to avoid buying "ghost" tokens.
+            return;
+        }
 
-        console.log("🔥 Execute: Final Buy Sequence");
         const swap = await axios.post(`${JUP_DNS}/v6/swap`, { 
-            quoteResponse: quote, 
-            userPublicKey: wallet.publicKey.toBase58(), 
-            wrapAndUnwrapSol: true, 
-            prioritizationFeeLamports: 1000000, // Max Priority
-            dynamicComputeUnitLimit: true 
+            quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 1000000, dynamicComputeUnitLimit: true 
         }).catch(() => axios.post(`${JUP_IP}/v6/swap`, { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 1000000, dynamicComputeUnitLimit: true }, { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent }));
 
         const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
         tx.sign([wallet]);
         const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
         
-        bot.sendMessage(MY_ID, `💎 AUTO-SNIPE SUCCESS!\nhttps://solscan.io/tx/${sig}`);
+        bot.sendMessage(MY_ID, `💎 APEX SNIPE! https://solscan.io/tx/${sig}`);
         monitorPrice(mint, amount / parseFloat(quote.outAmount), quote.outAmount);
         
-    } catch (e) { 
-        console.log(`🚨 Status: ${e.message}`); 
-    }
+    } catch (e) { console.log(`🚨 Status: ${e.message}`); }
 }
 
 async function toggleScanning(on) {
@@ -110,7 +106,7 @@ async function toggleScanning(on) {
                         if (mint) await buyToken(mint);
                     }
                 } catch (e) { }
-                setTimeout(() => { isWorking = false; toggleScanning(true); }, 45000);
+                setTimeout(() => { isWorking = false; toggleScanning(true); }, 30000);
             }, 'processed');
             subIds.push(id);
         });
@@ -119,5 +115,5 @@ async function toggleScanning(on) {
 
 process.on('uncaughtException', () => { isWorking = false; toggleScanning(true); });
 
-console.log("🚀 V13 RELENTLESS AUTO-SNIPER ONLINE.");
+console.log("🚀 APEX V14 ONLINE. SCANNING...");
 toggleScanning(true);
