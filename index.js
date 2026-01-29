@@ -5,13 +5,7 @@ const axios = require('axios');
 const bs58 = require('bs58').default || require('bs58'); 
 require('dotenv').config();
 
-// 1. SMART CONNECTION (Added Fetch Limit)
-const connection = new Connection(process.env.RPC_URL, { 
-    wsEndpoint: process.env.WSS_URL, 
-    commitment: 'processed',
-    confirmTransactionInitialTimeout: 30000 
-});
-
+const connection = new Connection(process.env.RPC_URL, { wsEndpoint: process.env.WSS_URL, commitment: 'processed' });
 const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY.trim()));
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN.trim(), { polling: true });
 const jupiter = createJupiterApiClient(); 
@@ -22,10 +16,7 @@ const RAYDIUM_CPMM_ID = new PublicKey('CAMMCzoKmcEB3snv69UC796S3hZpkS7vBrN3shvkk
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 let isPaused = false;
 
-// 🛡️ RATE LIMIT HELPER (Spaces out requests to avoid 429)
-const delay = (ms) => new Promise(res => setTimeout(res, ms));
-
-// 2. AUTO-SELL MONITOR
+// 1. AUTO-SELL MONITOR
 async function monitorPrice(mint, entryPrice, tokens) {
     const watchdog = setInterval(async () => {
         try {
@@ -37,13 +28,13 @@ async function monitorPrice(mint, entryPrice, tokens) {
                 const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
                 tx.sign([wallet]);
                 const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-                bot.sendMessage(MY_ID, `🎯 EXIT: ${price >= entryPrice * 1.5 ? "PROFIT" : "LOSS"} | https://solscan.io/tx/${sig}`);
+                bot.sendMessage(MY_ID, `🎯 EXIT: ${price >= entryPrice * 1.5 ? "TP" : "SL"} | https://solscan.io/tx/${sig}`);
             }
         } catch (e) { }
-    }, 20000);
+    }, 15000);
 }
 
-// 3. PERSISTENT BUYER
+// 2. BUYER
 async function buyToken(mint) {
     const start = Date.now();
     let quote = null;
@@ -51,36 +42,31 @@ async function buyToken(mint) {
         try {
             quote = await jupiter.quoteGet({ inputMint: SOL_MINT, outputMint: mint, amount: (0.01 * LAMPORTS_PER_SOL).toString(), slippageBps: 5000, onlyDirectRoutes: true });
             if (quote) break;
-        } catch (e) { await delay(3000); }
+        } catch (e) { await new Promise(r => setTimeout(r, 2000)); }
     }
-    if (!quote) return;
+    if (!quote) return bot.sendMessage(MY_ID, "❌ Jupiter Indexing Timeout.");
 
     try {
         const { swapTransaction } = await jupiter.swapPost({ swapRequest: { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: "auto" } });
         const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
         tx.sign([wallet]);
-        const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true, maxRetries: 5 });
-        bot.sendMessage(MY_ID, `🚀 BUY CONFIRMED!\nhttps://solscan.io/tx/${sig}`);
+        const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+        bot.sendMessage(MY_ID, `🚀 BOUGHT 0.01 SOL! https://solscan.io/tx/${sig}`);
         monitorPrice(mint, (0.01 * LAMPORTS_PER_SOL) / parseFloat(quote.outAmount), quote.outAmount);
     } catch (e) { console.log("🚨 Execution Error"); }
 }
 
-// 4. RATE-LIMITED SCANNER
+// 3. PARALLEL SCANNER
 [RAYDIUM_ID, RAYDIUM_CPMM_ID].forEach(pId => {
     connection.onLogs(pId, async ({ logs, signature, err }) => {
         if (err || isPaused || !logs.some(l => l.toLowerCase().includes("init"))) return;
 
         (async () => {
             let tx = null;
-            // 🛡️ Added random jitter to parsing attempts to avoid synchronized spikes
             for (let i = 0; i < 7; i++) {
-                try {
-                    tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
-                    if (tx) break;
-                } catch (e) {
-                    if (e.message.includes('429')) await delay(2000); // Heavy sleep if limited
-                }
-                await delay(2000 + (Math.random() * 500)); 
+                tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
+                if (tx) break;
+                await new Promise(r => setTimeout(r, 1500));
             }
             if (!tx) return;
 
@@ -94,23 +80,34 @@ async function buyToken(mint) {
             }
 
             if (mint) {
-                console.log(`🎯 TARGET: ${mint.slice(0, 10)}...`);
-                try {
-                    await delay(500); // 🛡️ Safety buffer for RugCheck
-                    const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { timeout: 7000 });
-                    const score = rug.data.score;
-                    console.log(`🛡️ ${mint.slice(0, 4)} SCORE: ${score}`);
+                console.log(`🎯 TARGET: ${mint}`);
+                
+                // 🛡️ ENHANCED RUGCHECK
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    try {
+                        const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { timeout: 6000 });
+                        const score = rug.data.score;
+                        console.log(`🛡️ ${mint.slice(0, 4)} SCORE: ${score}`);
 
-                    if (score < 5000) {
-                        isPaused = true;
-                        bot.sendMessage(MY_ID, `🚀 SNIPING: ${mint}\nScore: ${score}`);
-                        await buyToken(mint);
-                        setTimeout(() => { isPaused = false; }, 60000);
+                        if (score < 5000) {
+                            isPaused = true;
+                            bot.sendMessage(MY_ID, `🚀 BUYING: ${mint}\nScore: ${score}`);
+                            await buyToken(mint);
+                            setTimeout(() => { isPaused = false; }, 60000);
+                            return;
+                        } else {
+                            console.log(`⚠️ SKIPPED: ${mint.slice(0, 4)} score too high (${score})`);
+                            return;
+                        }
+                    } catch (e) {
+                        console.log(`⏳ RugCheck Retry ${attempt + 1} for ${mint.slice(0, 4)}...`);
+                        await new Promise(r => setTimeout(r, 2000));
                     }
-                } catch (rugErr) { }
+                }
+                console.log(`❌ DROPPED: ${mint.slice(0, 4)} RugCheck unreachable.`);
             }
         })(); 
     }, 'processed');
 });
 
-console.log("🚀 RATE-LIMITED APEX SYSTEM LIVE.");
+console.log("🚀 FINAL APEX LIVE. READY TO BUY.");
