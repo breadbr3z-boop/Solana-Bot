@@ -7,7 +7,7 @@ require('dotenv').config();
 
 // 1. DUAL-PIPE CONNECTION (Standard + WebSocket)
 const connection = new Connection(process.env.RPC_URL, {
-    wsEndpoint: process.env.WSS_URL, // 🚀 The new "listening" pipe
+    wsEndpoint: process.env.WSS_URL, 
     commitment: 'processed'
 });
 
@@ -22,7 +22,7 @@ let scanHistory = [];
 
 // 🔥 INDEPENDENT HEARTBEAT
 const heartbeat = setInterval(() => {
-    console.log(`💓 Heartbeat: ${new Date().toLocaleTimeString()} | Dual-Pipe Connection Live`);
+    console.log(`💓 Heartbeat: ${new Date().toLocaleTimeString()} | Bot Engine Healthy`);
 }, 60000);
 heartbeat.unref(); 
 
@@ -32,7 +32,7 @@ bot.on('message', async (msg) => {
     const text = msg.text?.toLowerCase();
 
     if (text === '/start' || text === 'ping') {
-        bot.sendMessage(chatId, "👋 Connection verified! Dual-pipe scanner is live.");
+        bot.sendMessage(chatId, "👋 Connection verified! I am scanning Solana Raydium launches...");
     } 
     else if (text === '/status') {
         try {
@@ -47,11 +47,23 @@ bot.on('message', async (msg) => {
         } catch (e) { bot.sendMessage(chatId, "❌ Balance check failed."); }
     } 
     else if (text === '/log') {
-        if (scanHistory.length === 0) bot.sendMessage(chatId, "📁 Log empty. Listening for new launches...");
+        if (scanHistory.length === 0) bot.sendMessage(chatId, "📁 Log empty. No new pools detected since restart.");
         else {
             const report = scanHistory.map(h => `📍 ${h.time} | Score: ${h.score} | ${h.action}\nMint: ${h.mint.slice(0, 10)}...`).join('\n\n');
             bot.sendMessage(chatId, `📋 Recent Activity:\n\n${report}`);
         }
+    }
+    // 🧪 NEW: TEST LOG COMMAND
+    else if (text === '/testlog') {
+        const fakeMint = "TEST_MINT_" + Math.floor(Math.random() * 1000);
+        const fakeScore = Math.floor(Math.random() * 1000);
+        const action = fakeScore < 500 ? "✅ BOUGHT (Simulated)" : "❌ SKIPPED (Simulated)";
+        
+        scanHistory.unshift({ time: new Date().toLocaleTimeString(), mint: fakeMint, score: fakeScore, action: action });
+        if (scanHistory.length > 5) scanHistory.pop();
+        
+        bot.sendMessage(chatId, `🧪 TEST ALERT:\nDetected: ${fakeMint}\nSafety Score: ${fakeScore}\nAction: ${action}\n\n*Check /log to see this entry!*`);
+        console.log("🛠️ Manual Test Log Triggered");
     }
 });
 
@@ -60,12 +72,7 @@ async function sellToken(mint, amountTokens) {
     try {
         const quote = await jupiter.quoteGet({ inputMint: mint, outputMint: SOL_MINT, amount: amountTokens.toString(), slippageBps: 2000 });
         const { swapTransaction } = await jupiter.swapPost({
-            swapRequest: { 
-                quoteResponse: quote, 
-                userPublicKey: wallet.publicKey.toBase58(), 
-                wrapAndUnwrapSol: true,
-                prioritizationFeeLamports: "auto" 
-            }
+            swapRequest: { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: "auto" }
         });
         const transaction = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
         transaction.sign([wallet]);
@@ -92,23 +99,14 @@ async function buyToken(mint, amountSol = 0.05) {
     try {
         console.log(`⏳ Waiting 5s for liquidity...`);
         await new Promise(r => setTimeout(r, 5000)); 
-
         const amountInLamports = Math.floor(amountSol * 1e9).toString();
         const quote = await jupiter.quoteGet({ inputMint: SOL_MINT, outputMint: mint, amount: amountInLamports, slippageBps: 2500 }); 
-        
         const { swapTransaction } = await jupiter.swapPost({
-            swapRequest: { 
-                quoteResponse: quote, 
-                userPublicKey: wallet.publicKey.toBase58(), 
-                wrapAndUnwrapSol: true,
-                prioritizationFeeLamports: "auto" 
-            }
+            swapRequest: { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: "auto" }
         });
-
         const transaction = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
         transaction.sign([wallet]);
         const signature = await connection.sendRawTransaction(transaction.serialize(), { skipPreflight: true });
-        
         bot.sendMessage(MY_ID, `✅ BOUGHT: ${mint}\nTX: https://solscan.io/tx/${signature}`);
         startMonitoring(mint, (parseFloat(amountInLamports) / parseFloat(quote.outAmount)), quote.outAmount);
     } catch (e) { 
@@ -119,9 +117,7 @@ async function buyToken(mint, amountSol = 0.05) {
 
 // 5. SCANNER (The Listening Engine)
 connection.onLogs(RAYDIUM_ID, async ({ logs, signature, err }) => {
-    // 🔥 "The Firehose" proof of life
     console.log(`👀 Activity: ${signature.slice(0, 8)}...`);
-    
     if (err || !logs.some(log => log.includes("initialize2"))) return;
 
     try {
@@ -143,4 +139,4 @@ connection.onLogs(RAYDIUM_ID, async ({ logs, signature, err }) => {
     } catch (e) { }
 }, 'processed');
 
-console.log("🚀 DUAL-PIPE ELITE BOT LIVE.");
+console.log("🚀 MASTER BOT WITH TEST LOGS LIVE.");
