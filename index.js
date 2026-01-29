@@ -1,6 +1,7 @@
 const { Connection, PublicKey, Keypair, VersionedTransaction, LAMPORTS_PER_SOL } = require('@solana/web3.js');
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
+const https = require('https'); // 🔑 Added for the SSL fix
 const bs58 = require('bs58').default || require('bs58'); 
 require('dotenv').config();
 
@@ -12,6 +13,9 @@ const MY_ID = process.env.CHAT_ID;
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const JUP_IP = "https://74.125.22.103"; 
 
+// 🔑 THE SSL BYPASS AGENT (Fixes the "Cert Mismatch" error)
+const agent = new https.Agent({ rejectUnauthorized: false });
+
 let isWorking = false;
 let subIds = [];
 
@@ -19,11 +23,16 @@ let subIds = [];
 async function monitorPrice(mint, entryPrice, tokens) {
     const interval = setInterval(async () => {
         try {
-            const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${mint}&outputMint=${SOL_MINT}&amount=${tokens}&slippageBps=100`, { headers: { 'Host': 'quote-api.jup.ag' } });
+            const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${mint}&outputMint=${SOL_MINT}&amount=${tokens}&slippageBps=100`, { 
+                headers: { 'Host': 'quote-api.jup.ag' },
+                httpsAgent: agent 
+            });
             const currentPrice = parseFloat(res.data.outAmount) / tokens;
             if (currentPrice >= entryPrice * 1.5 || currentPrice <= entryPrice * 0.7) {
                 clearInterval(interval);
-                const swap = await axios.post(`${JUP_IP}/v6/swap`, { quoteResponse: res.data, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 300000, dynamicComputeUnitLimit: true }, { headers: { 'Host': 'quote-api.jup.ag' } });
+                const swap = await axios.post(`${JUP_IP}/v6/swap`, { 
+                    quoteResponse: res.data, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 300000, dynamicComputeUnitLimit: true 
+                }, { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent });
                 const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
                 tx.sign([wallet]);
                 await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
@@ -33,7 +42,7 @@ async function monitorPrice(mint, entryPrice, tokens) {
     }, 30000); 
 }
 
-// 🚀 THE V9 BUYER (FAST-SYNC)
+// 🚀 THE V10 BUYER
 async function buyToken(mint) {
     try {
         console.log(`🛡️ Vetting: ${mint}`);
@@ -43,11 +52,11 @@ async function buyToken(mint) {
         const amount = Math.floor(0.01 * LAMPORTS_PER_SOL);
         let quote = null;
 
-        // Reduced loop for speed - if it doesn't show in 15s, we try the backup
         for (let i = 0; i < 5; i++) { 
             try {
                 const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=2000`, { 
-                    headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } 
+                    headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' },
+                    httpsAgent: agent // 🔑 Applied here
                 });
                 quote = res.data;
                 break; 
@@ -58,21 +67,18 @@ async function buyToken(mint) {
         }
 
         if (!quote) {
-            console.log("🚨 Jupiter too slow. Bypassing to Direct RPC...");
-            // This is where you would normally trigger a Raydium SDK swap, 
-            // but for Railway stability, we'll wait one final 10s block.
+            console.log("🚨 Jupiter fallback triggered...");
             await new Promise(r => setTimeout(r, 10000));
-            const retry = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=3000`, { headers: { 'Host': 'quote-api.jup.ag' } });
+            const retry = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=3000`, { 
+                headers: { 'Host': 'quote-api.jup.ag' }, 
+                httpsAgent: agent 
+            });
             quote = retry.data;
         }
 
         const swap = await axios.post(`${JUP_IP}/v6/swap`, { 
-            quoteResponse: quote, 
-            userPublicKey: wallet.publicKey.toBase58(), 
-            wrapAndUnwrapSol: true, 
-            prioritizationFeeLamports: 850000,
-            dynamicComputeUnitLimit: true 
-        }, { headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } });
+            quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 850000, dynamicComputeUnitLimit: true 
+        }, { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent });
 
         const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
         tx.sign([wallet]);
@@ -112,5 +118,5 @@ async function toggleScanning(on) {
 
 process.on('uncaughtException', () => { isWorking = false; toggleScanning(true); });
 
-console.log("🚀 V9 MASTER ONLINE. DEPLOY AND SLEEP.");
+console.log("🚀 V10 MASTER: SSL-BYPASS ACTIVE. SLEEP NOW.");
 toggleScanning(true);
