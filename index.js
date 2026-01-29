@@ -17,7 +17,7 @@ const JUP_IP = "https://74.125.22.103";
 let isWorking = false;
 let subIds = [];
 
-// 🎯 EXIT STRATEGY (+50% / -30%)
+// 🎯 AUTO-SELL WATCHDOG
 async function monitorPrice(mint, entryPrice, tokens) {
     const interval = setInterval(async () => {
         try {
@@ -25,7 +25,12 @@ async function monitorPrice(mint, entryPrice, tokens) {
             const currentPrice = parseFloat(res.data.outAmount) / tokens;
             if (currentPrice >= entryPrice * 1.5 || currentPrice <= entryPrice * 0.7) {
                 clearInterval(interval);
-                const swap = await axios.post(`${JUP_IP}/v6/swap`, { quoteResponse: res.data, userPublicKey: wallet.publicKey.toBase58(), prioritizationFeeLamports: 300000 }, { headers: { 'Host': 'quote-api.jup.ag' } });
+                const swap = await axios.post(`${JUP_IP}/v6/swap`, { 
+                    quoteResponse: res.data, 
+                    userPublicKey: wallet.publicKey.toBase58(), 
+                    wrapAndUnwrapSol: true,
+                    prioritizationFeeLamports: 300000 
+                }, { headers: { 'Host': 'quote-api.jup.ag' } });
                 const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
                 tx.sign([wallet]);
                 await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
@@ -35,17 +40,16 @@ async function monitorPrice(mint, entryPrice, tokens) {
     }, 20000); 
 }
 
-// 🚀 THE FINAL BUYER (With Indexing Retry)
+// 🚀 THE FINAL BUYER
 async function buyToken(mint) {
     try {
-        console.log(`🛡️ Vetting ${mint}`);
+        console.log(`🛡️ Vetting ${mint.slice(0, 8)}`);
         const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { timeout: 5000 });
         if (rug.data.score > 500) return console.log(`⚠️ Skip: Score ${rug.data.score}`);
 
         const amount = Math.floor(0.01 * LAMPORTS_PER_SOL);
         let quote = null;
 
-        // 🔄 JUPITER INDEXING RETRY LOOP
         for (let i = 0; i < 6; i++) {
             try {
                 const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=1000`, { 
@@ -54,14 +58,21 @@ async function buyToken(mint) {
                 quote = res.data;
                 break; 
             } catch (e) {
-                console.log(`🔄 Waiting for Jupiter indexing... attempt ${i+1}`);
                 await new Promise(r => setTimeout(r, 2500));
             }
         }
 
-        if (!quote) throw new Error("Jupiter indexing timeout");
+        if (!quote) throw new Error("Indexing timeout");
 
-        const swap = await axios.post(`${JUP_IP}/v6/swap`, { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 500000 }, { headers: { 'Host': 'quote-api.jup.ag' } });
+        // 🛠️ FIX: Added dynamicComputeUnitLimit to prevent 400 errors
+        const swap = await axios.post(`${JUP_IP}/v6/swap`, { 
+            quoteResponse: quote, 
+            userPublicKey: wallet.publicKey.toBase58(), 
+            wrapAndUnwrapSol: true, 
+            prioritizationFeeLamports: 500000,
+            dynamicComputeUnitLimit: true 
+        }, { headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } });
+
         const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
         tx.sign([wallet]);
         const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
@@ -69,7 +80,9 @@ async function buyToken(mint) {
         bot.sendMessage(MY_ID, `💎 SNIPE SUCCESS!\nhttps://solscan.io/tx/${sig}`);
         monitorPrice(mint, amount / parseFloat(quote.outAmount), quote.outAmount);
         
-    } catch (e) { console.log(`🚨 Buy Fail: ${e.message}`); }
+    } catch (e) { 
+        console.log(`🚨 Buy Fail: ${e.response?.data?.message || e.message}`); 
+    }
 }
 
 async function toggleScanning(on) {
@@ -86,7 +99,7 @@ async function toggleScanning(on) {
                     const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
                     if (tx) {
                         const accs = tx.transaction.message.accountKeys.map(k => k.pubkey.toBase58());
-                        const mint = accs.find(a => a !== SOL_MINT && a !== pId.toBase58() && a !== wallet.publicKey.toBase58() && !a.startsWith('1111') && !a.startsWith('Tokenkeg') && !a.startsWith('Sysvar') && !a.startsWith('Config'));
+                        const mint = accs.find(a => a !== SOL_MINT && a !== pId.toBase58() && a !== wallet.publicKey.toBase58() && !a.startsWith('1111') && !a.startsWith('Tokenkeg') && !a.startsWith('Sysvar'));
                         if (mint) await buyToken(mint);
                     }
                 } catch (e) { }
@@ -99,5 +112,5 @@ async function toggleScanning(on) {
 
 process.on('uncaughtException', () => { isWorking = false; toggleScanning(true); });
 
-console.log("🚀 MISSION ACCOMPLISHED. SYSTEM ACTIVE.");
+console.log("🚀 SLEDGEHAMMER V4: FINAL EXECUTION READY.");
 toggleScanning(true);
