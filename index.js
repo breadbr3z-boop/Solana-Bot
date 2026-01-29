@@ -17,7 +17,7 @@ const JUP_IP = "https://74.125.22.103";
 let isWorking = false;
 let subIds = [];
 
-// 🎯 AUTO-SELL WATCHDOG
+// 🎯 WATCHDOG
 async function monitorPrice(mint, entryPrice, tokens) {
     const interval = setInterval(async () => {
         try {
@@ -25,73 +25,55 @@ async function monitorPrice(mint, entryPrice, tokens) {
             const currentPrice = parseFloat(res.data.outAmount) / tokens;
             if (currentPrice >= entryPrice * 1.5 || currentPrice <= entryPrice * 0.7) {
                 clearInterval(interval);
-                const swap = await axios.post(`${JUP_IP}/v6/swap`, { 
-                    quoteResponse: res.data, 
-                    userPublicKey: wallet.publicKey.toBase58(), 
-                    wrapAndUnwrapSol: true,
-                    dynamicComputeUnitLimit: true,
-                    prioritizationFeeLamports: 300000 
-                }, { headers: { 'Host': 'quote-api.jup.ag' } });
+                const swap = await axios.post(`${JUP_IP}/v6/swap`, { quoteResponse: res.data, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 300000, dynamicComputeUnitLimit: true }, { headers: { 'Host': 'quote-api.jup.ag' } });
                 const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
                 tx.sign([wallet]);
                 await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-                bot.sendMessage(MY_ID, `🎯 AUTO-SELL: ${currentPrice >= entryPrice * 1.5 ? "TAKE PROFIT" : "STOP LOSS"}`);
+                bot.sendMessage(MY_ID, `🎯 EXIT: ${currentPrice >= entryPrice * 1.5 ? "PROFIT" : "LOSS"}`);
             }
         } catch (e) { }
     }, 20000); 
 }
 
-// 🚀 THE BULLETPROOF BUYER
+// 🚀 THE CORRECTED BUYER
 async function buyToken(mint) {
     try {
-        console.log(`🛡️ Vetting ${mint.slice(0, 8)}`);
+        console.log(`🛡️ Vetting: ${mint}`);
         const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { timeout: 5000 });
         if (rug.data.score > 500) return console.log(`⚠️ Skip: Score ${rug.data.score}`);
 
         const amount = Math.floor(0.01 * LAMPORTS_PER_SOL);
         let quote = null;
 
-        // Indexing loop
-        for (let i = 0; i < 6; i++) {
+        for (let i = 0; i < 8; i++) { // Increased retries for indexing
             try {
-                const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=1000`, { 
-                    headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } 
-                });
+                const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=1500`, { headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } });
                 quote = res.data;
                 break; 
-            } catch (e) { await new Promise(r => setTimeout(r, 2000)); }
+            } catch (e) { 
+                console.log("🔄 Waiting for Jupiter Index...");
+                await new Promise(r => setTimeout(r, 3000)); 
+            }
         }
 
-        if (!quote) throw new Error("Indexing timeout");
+        if (!quote) throw new Error("Jupiter Timeout");
 
-        // 🛠️ HARDENED SWAP CALL
         const swap = await axios.post(`${JUP_IP}/v6/swap`, { 
             quoteResponse: quote, 
             userPublicKey: wallet.publicKey.toBase58(), 
             wrapAndUnwrapSol: true, 
-            prioritizationFeeLamports: 500000,
-            dynamicComputeUnitLimit: true, // Required for priority fees
-            useSharedAccounts: true      // Reduces transaction size
-        }, { 
-            headers: { 
-                'Host': 'quote-api.jup.ag', 
-                'Content-Type': 'application/json',
-                'User-Agent': 'Mozilla/5.0' 
-            } 
-        });
+            prioritizationFeeLamports: 600000,
+            dynamicComputeUnitLimit: true 
+        }, { headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } });
 
         const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
         tx.sign([wallet]);
         const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
         
-        bot.sendMessage(MY_ID, `💎 SNIPE SUCCESS!\nhttps://solscan.io/tx/${sig}`);
+        bot.sendMessage(MY_ID, `💎 SNIPE! https://solscan.io/tx/${sig}`);
         monitorPrice(mint, amount / parseFloat(quote.outAmount), quote.outAmount);
         
-    } catch (e) { 
-        // 🔍 DEBUG: This will print the exact reason Jupiter says 400
-        const errorDetail = e.response?.data?.error || e.response?.data?.message || e.message;
-        console.log(`🚨 Buy Fail: ${errorDetail}`); 
-    }
+    } catch (e) { console.log(`🚨 Buy Fail: ${e.response?.data?.error || e.message}`); }
 }
 
 async function toggleScanning(on) {
@@ -107,19 +89,25 @@ async function toggleScanning(on) {
                 try {
                     const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
                     if (tx) {
-                        const accs = tx.transaction.message.accountKeys.map(k => k.pubkey.toBase58());
-                        const mint = accs.find(a => a !== SOL_MINT && a !== pId.toBase58() && a !== wallet.publicKey.toBase58() && !a.startsWith('1111') && !a.startsWith('Tokenkeg') && !a.startsWith('Sysvar'));
-                        if (mint) await buyToken(mint);
+                        // 🛠️ HARDENED MINT DETECTION
+                        // Look for the token that is NOT SOL and NOT the program/vault
+                        const meta = tx.meta.postTokenBalances;
+                        const mint = meta.find(m => m.mint !== SOL_MINT && m.owner !== pId.toBase58())?.mint;
+                        
+                        if (mint) {
+                            console.log(`🎯 TARGET DETECTED: ${mint}`);
+                            await buyToken(mint);
+                        }
                     }
                 } catch (e) { }
-                setTimeout(() => { isWorking = false; toggleScanning(true); }, 45000);
+                setTimeout(() => { isWorking = false; toggleScanning(true); }, 30000);
             }, 'processed');
             subIds.push(id);
         });
     }
 }
 
-process.on('uncaughtException', (err) => { isWorking = false; toggleScanning(true); });
+process.on('uncaughtException', () => { isWorking = false; toggleScanning(true); });
 
-console.log("🚀 SLEDGEHAMMER V5: THE FINAL STAND.");
+console.log("🚀 SLEDGEHAMMER V6: MINT-SENSING ACTIVE.");
 toggleScanning(true);
