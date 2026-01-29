@@ -23,7 +23,7 @@ let isPaused = false;
 
 // 🔥 HEARTBEAT (1 Minute)
 const heartbeat = setInterval(() => {
-    console.log(`💓 Heartbeat: ${new Date().toLocaleTimeString()} | Testing Mode (0.01 SOL)`);
+    console.log(`💓 Heartbeat: ${new Date().toLocaleTimeString()} | Universal Scanner Active`);
 }, 60000);
 heartbeat.unref(); 
 
@@ -33,17 +33,16 @@ bot.on('message', async (msg) => {
     const text = msg.text?.toLowerCase();
 
     if (text === '/status') {
-        const version = await connection.getVersion().catch(() => ({ "solana-core": "Error" }));
-        bot.sendMessage(chatId, `📊 Status: TESTING MODE\n💰 Buy: 0.01 SOL\n🛡️ Filter: < 5000\n⏳ Cooldown: ${isPaused ? "ACTIVE" : "READY"}`);
+        bot.sendMessage(chatId, `📊 Status: UNIVERSAL TEST MODE\n💰 Buy: 0.01 SOL\n🛡️ Filter: < 5000\n⏳ Cooldown: ${isPaused ? "ACTIVE" : "READY"}`);
     } 
     else if (text === '/balance') {
         const bal = await connection.getBalance(wallet.publicKey).catch(() => 0);
         bot.sendMessage(chatId, `💰 Wallet: ${(bal / LAMPORTS_PER_SOL).toFixed(4)} SOL`);
     } 
     else if (text === '/log') {
-        if (scanHistory.length === 0) bot.sendMessage(chatId, "📁 Log empty.");
+        if (scanHistory.length === 0) bot.sendMessage(chatId, "📁 Log empty. Listening for new pools...");
         else {
-            const report = scanHistory.map(h => `📍 ${h.time} | Score: ${h.score} | ${h.action}`).join('\n\n');
+            const report = scanHistory.slice(0, 10).map(h => `📍 ${h.time} | Score: ${h.score} | ${h.action}\nMint: ${h.mint.slice(0, 10)}...`).join('\n\n');
             bot.sendMessage(chatId, `📋 Recent Activity:\n\n${report}`);
         }
     }
@@ -52,7 +51,7 @@ bot.on('message', async (msg) => {
     }
 });
 
-// 2. SELL FUNCTION (Includes Priority Fee)
+// 2. SELL FUNCTION
 async function sellToken(mint, amountTokens) {
     try {
         const quote = await jupiter.quoteGet({ inputMint: mint, outputMint: SOL_MINT, amount: amountTokens.toString(), slippageBps: 2000 });
@@ -66,7 +65,7 @@ async function sellToken(mint, amountTokens) {
     } catch (e) { console.error("🚨 Sell Failed:", e.message); }
 }
 
-// 3. MONITORING (+50% / -30%)
+// 3. MONITORING
 async function startMonitoring(mint, entryPrice, tokenBalance) {
     const interval = setInterval(async () => {
         try {
@@ -79,10 +78,10 @@ async function startMonitoring(mint, entryPrice, tokenBalance) {
     }, 15000);
 }
 
-// 4. BUY FUNCTION (Updated to 0.01 SOL)
+// 4. BUY FUNCTION
 async function buyToken(mint, amountSol = 0.01) {
     try {
-        console.log(`⏳ Waiting 5s for liquidity...`);
+        console.log(`⏳ Waiting 5s for liquidity propagation...`);
         await new Promise(r => setTimeout(r, 5000)); 
         const amountInLamports = Math.floor(amountSol * 1e9).toString();
         const quote = await jupiter.quoteGet({ inputMint: SOL_MINT, outputMint: mint, amount: amountInLamports, slippageBps: 2500 }); 
@@ -101,33 +100,48 @@ async function buyToken(mint, amountSol = 0.01) {
     }
 }
 
-// 5. SCANNER (The Listening Engine)
+// 5. THE UNIVERSAL SCANNER
 connection.onLogs(RAYDIUM_ID, async ({ logs, signature, err }) => {
     console.log(`👀 Activity: ${signature.slice(0, 8)}...`);
-    if (isPaused || err || !logs.some(log => log.includes("initialize2"))) return;
+    if (err) return;
+
+    // 🔍 Wide-Net Filter
+    const isNewPool = logs.some(log => {
+        const l = log.toLowerCase();
+        return l.includes("initialize2") || l.includes("initialize") || (l.includes("pool") && l.includes("init"));
+    });
+
+    if (!isNewPool || isPaused) return;
 
     try {
-        const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0 });
-        const tokenMint = tx?.transaction.message.instructions.find(ix => ix.programId.equals(RAYDIUM_ID))?.accounts[8].toBase58();
+        console.log(`💎 NEW POOL DETECTED: ${signature}`);
+        const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
+        
+        // Find Raydium instruction and check common account slots for the token mint
+        const ix = tx?.transaction.message.instructions.find(i => i.programId.equals(RAYDIUM_ID));
+        const tokenMint = ix?.accounts[8]?.toBase58() || ix?.accounts[9]?.toBase58();
+
+        if (!tokenMint || tokenMint === SOL_MINT) return;
 
         const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, { timeout: 5000 });
         const score = rug.data.score;
         
-        // 🧪 TEST MODE: BUY NEARLY ANYTHING
         const action = score < 5000 ? "✅ BOUGHT" : "❌ SKIPPED";
         scanHistory.unshift({ time: new Date().toLocaleTimeString(), mint: tokenMint, score: score, action: action });
 
         if (score < 5000) {
             isPaused = true; 
-            bot.sendMessage(MY_ID, `🚀 TEST BUY (0.01 SOL): ${tokenMint}\nScore: ${score}`);
+            bot.sendMessage(MY_ID, `🚀 DETECTED LAUNCH: ${tokenMint}\nScore: ${score}\nAction: BUY 0.01 SOL`);
             await buyToken(tokenMint);
             
             setTimeout(() => { 
                 isPaused = false; 
-                console.log("🔓 Cooldown over. Ready for next test."); 
+                console.log("🔓 Cooldown over."); 
             }, 60000); 
         }
-    } catch (e) { }
+    } catch (e) {
+        console.log("⚠️ Signal filtered or parsing error.");
+    }
 }, 'processed');
 
-console.log("🚀 TESTING MODE LIVE (0.01 SOL). Filter < 5000.");
+console.log("🚀 UNIVERSAL MASTER BOT LIVE. Testing 0.01 SOL @ 5000 Score.");
