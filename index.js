@@ -12,70 +12,64 @@ const MY_ID = process.env.CHAT_ID;
 const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 const RAYDIUM_CPMM_ID = new PublicKey('CAMMCzoKmcEB3snv69UC796S3hZpkS7vBrN3shvkk9A'); 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
-const JUP_IP = "https://74.125.22.103"; // Direct IP bypass
+const JUP_IP = "https://74.125.22.103"; 
 
 let isWorking = false;
 let subIds = [];
 
-// 🎯 AUTO-SELL WATCHDOG (+50% / -30%)
+// 🎯 EXIT STRATEGY (+50% / -30%)
 async function monitorPrice(mint, entryPrice, tokens) {
     const interval = setInterval(async () => {
         try {
-            const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${mint}&outputMint=${SOL_MINT}&amount=${tokens}&slippageBps=50`, { 
-                headers: { 'Host': 'quote-api.jup.ag' } 
-            });
+            const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${mint}&outputMint=${SOL_MINT}&amount=${tokens}&slippageBps=100`, { headers: { 'Host': 'quote-api.jup.ag' } });
             const currentPrice = parseFloat(res.data.outAmount) / tokens;
-            
             if (currentPrice >= entryPrice * 1.5 || currentPrice <= entryPrice * 0.7) {
                 clearInterval(interval);
-                const swap = await axios.post(`${JUP_IP}/v6/swap`, { 
-                    quoteResponse: res.data, 
-                    userPublicKey: wallet.publicKey.toBase58(), 
-                    wrapAndUnwrapSol: true,
-                    prioritizationFeeLamports: 300000 
-                }, { headers: { 'Host': 'quote-api.jup.ag' } });
-                
+                const swap = await axios.post(`${JUP_IP}/v6/swap`, { quoteResponse: res.data, userPublicKey: wallet.publicKey.toBase58(), prioritizationFeeLamports: 300000 }, { headers: { 'Host': 'quote-api.jup.ag' } });
                 const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
                 tx.sign([wallet]);
                 await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-                bot.sendMessage(MY_ID, `🎯 AUTO-SELL: ${currentPrice >= entryPrice * 1.5 ? "TAKE PROFIT 🚀" : "STOP LOSS 📉"}`);
+                bot.sendMessage(MY_ID, `🎯 AUTO-SELL: ${currentPrice >= entryPrice * 1.5 ? "TAKE PROFIT" : "STOP LOSS"}`);
             }
         } catch (e) { }
     }, 20000); 
 }
 
-// 🚀 THE MASTER BUYER
+// 🚀 THE FINAL BUYER (With Indexing Retry)
 async function buyToken(mint) {
     try {
-        console.log(`🛡️ Vetting ${mint.slice(0, 8)}`);
+        console.log(`🛡️ Vetting ${mint}`);
         const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { timeout: 5000 });
         if (rug.data.score > 500) return console.log(`⚠️ Skip: Score ${rug.data.score}`);
 
-        // FIX: Ensure amount is an integer
         const amount = Math.floor(0.01 * LAMPORTS_PER_SOL);
-        
-        console.log(`✅ Passed! Getting Quote...`);
-        const quote = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=1000`, { 
-            headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } 
-        });
+        let quote = null;
 
-        const swap = await axios.post(`${JUP_IP}/v6/swap`, { 
-            quoteResponse: quote.data, 
-            userPublicKey: wallet.publicKey.toBase58(), 
-            wrapAndUnwrapSol: true,
-            prioritizationFeeLamports: 500000 
-        }, { headers: { 'Host': 'quote-api.jup.ag' } });
+        // 🔄 JUPITER INDEXING RETRY LOOP
+        for (let i = 0; i < 6; i++) {
+            try {
+                const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=1000`, { 
+                    headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } 
+                });
+                quote = res.data;
+                break; 
+            } catch (e) {
+                console.log(`🔄 Waiting for Jupiter indexing... attempt ${i+1}`);
+                await new Promise(r => setTimeout(r, 2500));
+            }
+        }
 
+        if (!quote) throw new Error("Jupiter indexing timeout");
+
+        const swap = await axios.post(`${JUP_IP}/v6/swap`, { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 500000 }, { headers: { 'Host': 'quote-api.jup.ag' } });
         const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
         tx.sign([wallet]);
         const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
         
         bot.sendMessage(MY_ID, `💎 SNIPE SUCCESS!\nhttps://solscan.io/tx/${sig}`);
-        monitorPrice(mint, amount / parseFloat(quote.data.outAmount), quote.data.outAmount);
+        monitorPrice(mint, amount / parseFloat(quote.outAmount), quote.outAmount);
         
-    } catch (e) {
-        console.log(`🚨 Buy Fail: ${e.response?.data?.error || e.message}`);
-    }
+    } catch (e) { console.log(`🚨 Buy Fail: ${e.message}`); }
 }
 
 async function toggleScanning(on) {
@@ -92,7 +86,7 @@ async function toggleScanning(on) {
                     const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
                     if (tx) {
                         const accs = tx.transaction.message.accountKeys.map(k => k.pubkey.toBase58());
-                        const mint = accs.find(a => a !== SOL_MINT && a !== pId.toBase58() && a !== wallet.publicKey.toBase58() && !a.startsWith('1111') && !a.startsWith('Tokenkeg'));
+                        const mint = accs.find(a => a !== SOL_MINT && a !== pId.toBase58() && a !== wallet.publicKey.toBase58() && !a.startsWith('1111') && !a.startsWith('Tokenkeg') && !a.startsWith('Sysvar') && !a.startsWith('Config'));
                         if (mint) await buyToken(mint);
                     }
                 } catch (e) { }
@@ -103,7 +97,7 @@ async function toggleScanning(on) {
     }
 }
 
-process.on('uncaughtException', (err) => { isWorking = false; toggleScanning(true); });
+process.on('uncaughtException', () => { isWorking = false; toggleScanning(true); });
 
-console.log("🚀 FINAL SLEDGEHAMMER ONLINE.");
+console.log("🚀 MISSION ACCOMPLISHED. SYSTEM ACTIVE.");
 toggleScanning(true);
