@@ -29,6 +29,7 @@ async function monitorPrice(mint, entryPrice, tokens) {
                     quoteResponse: res.data, 
                     userPublicKey: wallet.publicKey.toBase58(), 
                     wrapAndUnwrapSol: true,
+                    dynamicComputeUnitLimit: true,
                     prioritizationFeeLamports: 300000 
                 }, { headers: { 'Host': 'quote-api.jup.ag' } });
                 const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
@@ -40,7 +41,7 @@ async function monitorPrice(mint, entryPrice, tokens) {
     }, 20000); 
 }
 
-// 🚀 THE FINAL BUYER
+// 🚀 THE BULLETPROOF BUYER
 async function buyToken(mint) {
     try {
         console.log(`🛡️ Vetting ${mint.slice(0, 8)}`);
@@ -50,6 +51,7 @@ async function buyToken(mint) {
         const amount = Math.floor(0.01 * LAMPORTS_PER_SOL);
         let quote = null;
 
+        // Indexing loop
         for (let i = 0; i < 6; i++) {
             try {
                 const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=1000`, { 
@@ -57,21 +59,26 @@ async function buyToken(mint) {
                 });
                 quote = res.data;
                 break; 
-            } catch (e) {
-                await new Promise(r => setTimeout(r, 2500));
-            }
+            } catch (e) { await new Promise(r => setTimeout(r, 2000)); }
         }
 
         if (!quote) throw new Error("Indexing timeout");
 
-        // 🛠️ FIX: Added dynamicComputeUnitLimit to prevent 400 errors
+        // 🛠️ HARDENED SWAP CALL
         const swap = await axios.post(`${JUP_IP}/v6/swap`, { 
             quoteResponse: quote, 
             userPublicKey: wallet.publicKey.toBase58(), 
             wrapAndUnwrapSol: true, 
             prioritizationFeeLamports: 500000,
-            dynamicComputeUnitLimit: true 
-        }, { headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } });
+            dynamicComputeUnitLimit: true, // Required for priority fees
+            useSharedAccounts: true      // Reduces transaction size
+        }, { 
+            headers: { 
+                'Host': 'quote-api.jup.ag', 
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0' 
+            } 
+        });
 
         const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
         tx.sign([wallet]);
@@ -81,7 +88,9 @@ async function buyToken(mint) {
         monitorPrice(mint, amount / parseFloat(quote.outAmount), quote.outAmount);
         
     } catch (e) { 
-        console.log(`🚨 Buy Fail: ${e.response?.data?.message || e.message}`); 
+        // 🔍 DEBUG: This will print the exact reason Jupiter says 400
+        const errorDetail = e.response?.data?.error || e.response?.data?.message || e.message;
+        console.log(`🚨 Buy Fail: ${errorDetail}`); 
     }
 }
 
@@ -110,7 +119,7 @@ async function toggleScanning(on) {
     }
 }
 
-process.on('uncaughtException', () => { isWorking = false; toggleScanning(true); });
+process.on('uncaughtException', (err) => { isWorking = false; toggleScanning(true); });
 
-console.log("🚀 SLEDGEHAMMER V4: FINAL EXECUTION READY.");
+console.log("🚀 SLEDGEHAMMER V5: THE FINAL STAND.");
 toggleScanning(true);
