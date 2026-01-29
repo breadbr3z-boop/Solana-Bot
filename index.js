@@ -7,14 +7,14 @@ require('dotenv').config();
 
 // 1. SETUP
 const connection = new Connection(process.env.RPC_URL, { wsEndpoint: process.env.WSS_URL, commitment: 'processed' });
-const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY.trim()));
+const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY.trim().replace(/[^a-zA-Z0-9]/g, '')));
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN.trim(), { polling: true });
 const jupiter = createJupiterApiClient(); 
 const MY_ID = process.env.CHAT_ID;
 
-// 🔥 CORRECTED & VERIFIED IDs
+// 🔥 CORRECTED PROGRAM IDs
 const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
-const RAYDIUM_CPMM_ID = new PublicKey('CPMMoo8LqacmJvYtSvpPbcS0_Dk686Fm_2T-L0k_68'); 
+const RAYDIUM_CPMM_ID = new PublicKey('CAMMCzoKmcEB3snv69UC796S3hZpkS7vBrN3shvkk9A'); 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 let isPaused = false; 
 
