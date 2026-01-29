@@ -10,55 +10,52 @@ const bot = new TelegramBot(process.env.TELEGRAM_TOKEN.trim(), { polling: true }
 const MY_ID = process.env.CHAT_ID;
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
-
-// 🌐 THE RELIABLE PATHS
-const JUP_LINKS = [
-    "https://quote-api.jup.ag/v6",
-    "https://public.jupiterapi.com/v6" // Mirror for failover
-];
+const RAY_API = "https://transaction-mainnet.raydium.io/v1/compute/swapbasein";
 
 let isWorking = false;
 
-async function nuclearBuy(mint) {
-    console.log(`🔥 STRIKING: ${mint.slice(0,6)}`);
+// 🎯 THE DIRECT STRIKE
+async function directStrike(mint) {
+    console.log(`⚡ DIRECT STRIKE: ${mint.slice(0,6)}`);
     
-    for (let link of JUP_LINKS) {
-        try {
-            // 1. GET QUOTE
-            const quote = await axios.get(`${link}/quote`, {
-                params: { inputMint: SOL_MINT, outputMint: mint, amount: Math.floor(0.01 * LAMPORTS_PER_SOL), slippageBps: 5000 },
-                timeout: 3000
-            });
+    try {
+        // We bypass Jupiter entirely and ask Raydium's backend for the transaction data
+        const res = await axios.post(RAY_API, {
+            inputMint: SOL_MINT,
+            outputMint: mint,
+            amount: Math.floor(0.01 * LAMPORTS_PER_SOL),
+            slippageBps: 5000, // 50% slippage to guarantee the fill on a volatile launch
+            txVersion: 'V0',
+            payer: wallet.publicKey.toBase58()
+        }, { timeout: 5000 });
 
-            // 2. GET SWAP
-            const swap = await axios.post(`${link}/swap`, {
-                quoteResponse: quote.data,
-                userPublicKey: wallet.publicKey.toBase58(),
-                wrapAndUnwrapSol: true,
-                prioritizationFeeLamports: 1000000,
-                dynamicComputeUnitLimit: true
-            }, { timeout: 4000 });
-
-            // 3. BLAST
-            const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
+        if (res.data && res.data.success && res.data.data[0]) {
+            const txData = res.data.data[0].transaction;
+            const tx = VersionedTransaction.deserialize(Buffer.from(txData, 'base64'));
             tx.sign([wallet]);
-            const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
             
-            bot.sendMessage(MY_ID, `💎 NUCLEAR SNIPE LANDED!\nhttps://solscan.io/tx/${sig}`);
-            return; // Exit if successful
-
-        } catch (e) {
-            console.log(`🔄 Path ${link.includes('jup.ag') ? 'Primary' : 'Mirror'} failed, trying next...`);
+            const sig = await connection.sendRawTransaction(tx.serialize(), { 
+                skipPreflight: true,
+                maxRetries: 2 
+            });
+            
+            bot.sendMessage(MY_ID, `🔥 DIRECT SNIPE SUCCESS!\nhttps://solscan.io/tx/${sig}`);
+            console.log(`💎 Transaction Sent: ${sig}`);
+        } else {
+            console.log("🚨 Raydium API: Pool not liquid yet.");
         }
+    } catch (e) {
+        console.log(`🚨 Strike Fail: ${e.message}`);
     }
-    console.log("🚨 All paths exhausted. Coin likely too new for Jupiter.");
 }
 
 async function buyToken(mint) {
     try {
-        const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { timeout: 4000 }).catch(() => ({ data: { score: 0 } }));
+        const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { timeout: 3000 }).catch(() => ({ data: { score: 0 } }));
         if (rug.data.score > 500) return console.log(`⚠️ Skip: Score ${rug.data.score}`);
-        await nuclearBuy(mint);
+        
+        // No more Jupiter loops. We go straight to Raydium.
+        await directStrike(mint);
     } catch (e) { console.log(`🚨 Error: ${e.message}`); }
 }
 
@@ -84,5 +81,5 @@ async function toggleScanning(on) {
 
 process.once('SIGTERM', () => { bot.stopPolling(); process.exit(0); });
 
-console.log("🚀 V18 HYBRID NUCLEAR ONLINE.");
+console.log("🚀 V19 DIRECT-RAYDIUM ONLINE.");
 toggleScanning(true);
