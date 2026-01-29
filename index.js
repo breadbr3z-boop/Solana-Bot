@@ -14,11 +14,13 @@ const MY_ID = process.env.CHAT_ID;
 const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 const RAYDIUM_CPMM_ID = new PublicKey('CAMMCzoKmcEB3snv69UC796S3hZpkS7vBrN3shvkk9A'); 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
-let isPaused = false;
+
+// 🛡️ THE GLOBAL LOCK
+let isWorking = false; 
 
 const delay = (ms) => new Promise(res => setTimeout(res, ms));
 
-// 1. AUTO-SELL (Watchdog)
+// 1. AUTO-SELL MONITOR
 async function monitorPrice(mint, entryPrice, tokens) {
     const watchdog = setInterval(async () => {
         try {
@@ -29,14 +31,14 @@ async function monitorPrice(mint, entryPrice, tokens) {
                 const { swapTransaction } = await jupiter.swapPost({ swapRequest: { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: "auto" } });
                 const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
                 tx.sign([wallet]);
-                const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-                bot.sendMessage(MY_ID, `🎯 EXIT: ${price >= entryPrice * 1.5 ? "TP" : "SL"} | https://solscan.io/tx/${sig}`);
+                await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+                bot.sendMessage(MY_ID, `🎯 EXIT SUCCESS: ${price >= entryPrice * 1.5 ? "TP" : "SL"}`);
             }
         } catch (e) { }
-    }, 15000);
+    }, 20000);
 }
 
-// 2. THE BUYER
+// 2. THE BUYER (With Crash-Protection)
 async function buyToken(mint) {
     try {
         const quote = await jupiter.quoteGet({ inputMint: SOL_MINT, outputMint: mint, amount: (0.01 * LAMPORTS_PER_SOL).toString(), slippageBps: 5000 });
@@ -45,21 +47,28 @@ async function buyToken(mint) {
         const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
         tx.sign([wallet]);
         const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-        bot.sendMessage(MY_ID, `🚀 SNIPE SUCCESS! https://solscan.io/tx/${sig}`);
+        bot.sendMessage(MY_ID, `🚀 SNIPE BOUGHT! https://solscan.io/tx/${sig}`);
         monitorPrice(mint, (0.01 * LAMPORTS_PER_SOL) / parseFloat(quote.outAmount), quote.outAmount);
-    } catch (e) { }
+    } catch (e) { console.log("🚨 Buy Execution Error"); }
 }
 
-// 3. THE "STRICT 2000" SCANNER
+// 3. THE "DEEP-FREEZE" SCANNER
 [RAYDIUM_ID, RAYDIUM_CPMM_ID].forEach(pId => {
     connection.onLogs(pId, async ({ logs, signature, err }) => {
-        // 📉 JITTER-SKIP + TRAFFIC FILTER
-        if (Math.random() > 0.3 || err || isPaused || !logs.some(l => l.toLowerCase().includes("init"))) return;
+        // 🔒 HARD LOCK: If bot is doing ANYTHING, ignore everything else.
+        if (isWorking || err || !logs.some(l => l.toLowerCase().includes("init"))) return;
 
-        (async () => {
-            console.log(`💎 SIGNAL: ${signature.slice(0, 8)}`);
-            const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }).catch(() => null);
-            if (!tx) return;
+        isWorking = true; // Lock the gates
+        console.log(`💎 SIGNAL DETECTED: ${signature.slice(0, 8)}`);
+
+        try {
+            let tx = null;
+            for (let i = 0; i < 4; i++) {
+                tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' }).catch(() => null);
+                if (tx) break;
+                await delay(3000);
+            }
+            if (!tx) throw new Error("Parse Timeout");
 
             const allAccounts = tx.transaction.message.accountKeys.map(k => k.pubkey.toBase58());
             let mint = allAccounts.find(addr => 
@@ -68,32 +77,29 @@ async function buyToken(mint) {
             );
 
             if (mint) {
+                console.log(`🎯 TARGET: ${mint.slice(0, 8)}`);
                 try {
                     const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { timeout: 4000 });
-                    const score = rug.data.score;
-                    
-                    // 🎯 UPDATED SCORE FILTER: 2000
-                    if (score < 2000) {
-                        console.log(`✅ QUALITY MATCH: ${mint.slice(0,4)} (Score: ${score})`);
-                        isPaused = true;
+                    if (rug.data.score < 2000) {
                         await buyToken(mint);
-                        setTimeout(() => isPaused = false, 60000);
-                    } else {
-                        console.log(`⚠️ REJECTED: ${mint.slice(0,4)} score too high (${score})`);
+                        await delay(60000); 
                     }
                 } catch (e) {
-                    // Fallback to internal check if RugCheck is busy
+                    console.log(`⚠️ RugCheck Busy. Checking ${mint.slice(0,4)} Internally...`);
                     const info = await connection.getAccountInfo(new PublicKey(mint)).catch(() => null);
-                    if (info) {
-                        console.log(`⚠️ RugCheck Busy. Internal Pass for ${mint.slice(0,4)}`);
-                        isPaused = true;
+                    if (info && info.owner.toBase58().includes('Token')) {
+                        console.log(`✅ INTERNAL PASS: ${mint.slice(0,4)}`);
                         await buyToken(mint);
-                        setTimeout(() => isPaused = false, 60000);
+                        await delay(60000);
                     }
                 }
             }
-        })(); 
+        } catch (e) { console.log("🛑 Scan Interrupted/Failed"); }
+        
+        isWorking = false; // Unlock the gates
     }, 'processed');
 });
 
-console.log("🚀 STRICT APEX (SCORE 2000) LIVE.");
+process.on('uncaughtException', (err) => { console.log('🛡️ Blocked Crash:', err.message); isWorking = false; });
+
+console.log("🚀 BULLETPROOF APEX LIVE.");
