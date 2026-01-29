@@ -5,7 +5,7 @@ const axios = require('axios');
 const bs58 = require('bs58').default || require('bs58'); 
 require('dotenv').config();
 
-// 1. SYSTEM SETUP
+// 1. SYSTEM INITIALIZATION
 const connection = new Connection(process.env.RPC_URL, { wsEndpoint: process.env.WSS_URL, commitment: 'processed' });
 const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY.trim()));
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN.trim(), { polling: true });
@@ -20,11 +20,11 @@ let isPaused = false;
 // 2. TELEGRAM COMMANDS
 bot.on('message', (msg) => {
     if (msg.text === '/balance') connection.getBalance(wallet.publicKey).then(b => bot.sendMessage(msg.chat.id, `💰 Balance: ${(b / LAMPORTS_PER_SOL).toFixed(4)} SOL`));
-    if (msg.text === '/status') bot.sendMessage(msg.chat.id, "📊 Status: ACTIVE - DEEP SCANNING");
+    if (msg.text === '/status') bot.sendMessage(msg.chat.id, "📊 Status: PARALLEL SCANNING ACTIVE");
 });
-setInterval(() => console.log(`💓 Heartbeat: ${new Date().toLocaleTimeString()}`), 60000);
+setInterval(() => console.log(`💓 System Heartbeat: ${new Date().toLocaleTimeString()}`), 60000);
 
-// 3. AUTO-SELL MONITOR (+50% / -30%)
+// 3. AUTO-SELL WATCHDOG (+50% / -30%)
 async function monitorPrice(mint, entryPrice, tokens) {
     const watchdog = setInterval(async () => {
         try {
@@ -36,80 +36,81 @@ async function monitorPrice(mint, entryPrice, tokens) {
                 const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
                 tx.sign([wallet]);
                 const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-                bot.sendMessage(MY_ID, `🎯 ${price >= entryPrice * 1.5 ? "TP" : "SL"} HIT! Transaction: https://solscan.io/tx/${sig}`);
+                bot.sendMessage(MY_ID, `🎯 EXIT TRIGGERED: ${price >= entryPrice * 1.5 ? "TAKE PROFIT" : "STOP LOSS"}\nTX: https://solscan.io/tx/${sig}`);
             }
         } catch (e) { }
-    }, 20000);
+    }, 15000);
 }
 
-// 4. PERSISTENT BUYER (45s Loop)
+// 4. PERSISTENT BUYER (45s Persistent Loop)
 async function buyToken(mint) {
     const start = Date.now();
     let quote = null;
     while (Date.now() - start < 45000) {
         try {
-            console.log(`📡 Jupiter Sync... ${mint.slice(0, 5)}`);
             quote = await jupiter.quoteGet({ inputMint: SOL_MINT, outputMint: mint, amount: (0.01 * LAMPORTS_PER_SOL).toString(), slippageBps: 5000, onlyDirectRoutes: true });
             if (quote) break;
         } catch (e) { }
-        await new Promise(r => setTimeout(r, 2500));
+        await new Promise(r => setTimeout(r, 2000));
     }
-    if (!quote) return bot.sendMessage(MY_ID, "❌ Jupiter Timeout.");
+    if (!quote) return;
+
     try {
         const { swapTransaction } = await jupiter.swapPost({ swapRequest: { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: "auto", dynamicComputeUnitLimit: true } });
         const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
         tx.sign([wallet]);
         const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true, maxRetries: 5 });
-        bot.sendMessage(MY_ID, `✅ BUY SUCCESS! https://solscan.io/tx/${sig}`);
+        bot.sendMessage(MY_ID, `🚀 BUY SUCCESSFUL! 0.01 SOL\nhttps://solscan.io/tx/${sig}`);
         monitorPrice(mint, (0.01 * LAMPORTS_PER_SOL) / parseFloat(quote.outAmount), quote.outAmount);
-    } catch (e) { console.log("🚨 Execution Fail"); }
+    } catch (e) { console.log("🚨 Execution Error"); }
 }
 
-// 5. SHIELDED DEEP-SEARCH SCANNER
+// 5. ASYNC PARALLEL SCANNER
 [RAYDIUM_ID, RAYDIUM_CPMM_ID].forEach(pId => {
     connection.onLogs(pId, async ({ logs, signature, err }) => {
         console.log(`👀 Activity: ${signature.slice(0, 8)}...`);
         if (err || isPaused || !logs.some(l => l.toLowerCase().includes("init"))) return;
 
-        console.log(`💎 SIGNAL: ${signature.slice(0, 10)}...`);
-        let tx = null;
-        for (let i = 0; i < 8; i++) {
-            tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
-            if (tx) break;
-            await new Promise(r => setTimeout(r, 2000));
-        }
-        if (!tx) return console.log("❌ Parse Timeout");
-
-        try {
-            const allAccounts = tx.transaction.message.accountKeys.map(k => k.pubkey.toBase58());
-            let mint = null;
-            for (const addr of allAccounts) {
-                if (addr !== SOL_MINT && addr !== pId.toBase58() && addr !== wallet.publicKey.toBase58() && !addr.startsWith('1111') && !addr.startsWith('Tokenkeg')) {
-                    mint = addr;
-                    break; 
-                }
+        // ⚡ ASYNC WRAPPER: Processes this signal without blocking others
+        (async () => {
+            let tx = null;
+            for (let i = 0; i < 7; i++) {
+                tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
+                if (tx) break;
+                await new Promise(r => setTimeout(r, 1500));
             }
+            if (!tx) return;
 
-            if (mint) {
-                console.log(`🎯 TARGET: ${mint}`);
-                try {
-                    await new Promise(r => setTimeout(r, 1000)); // Shield Delay
-                    const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { timeout: 8000 });
-                    const score = rug.data.score;
-                    console.log(`🛡️ SCORE: ${score}`);
-
-                    if (score < 5000) {
-                        isPaused = true;
-                        bot.sendMessage(MY_ID, `🚀 BUYING: ${mint}\nScore: ${score}`);
-                        await buyToken(mint);
-                        setTimeout(() => { isPaused = false; }, 60000);
+            try {
+                const allAccounts = tx.transaction.message.accountKeys.map(k => k.pubkey.toBase58());
+                let mint = null;
+                for (const addr of allAccounts) {
+                    if (addr !== SOL_MINT && addr !== pId.toBase58() && addr !== wallet.publicKey.toBase58() && !addr.startsWith('1111') && !addr.startsWith('Tokenkeg')) {
+                        mint = addr;
+                        break; 
                     }
-                } catch (rugErr) {
-                    console.log(`⚠️ RugCheck Busy for ${mint.slice(0, 4)}... Skipping.`);
                 }
-            }
-        } catch (e) { console.log("🚨 Scan System Error"); }
+
+                if (mint) {
+                    console.log(`🎯 TARGET: ${mint.slice(0, 10)}...`);
+                    try {
+                        const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`, { timeout: 7000 });
+                        const score = rug.data.score;
+                        console.log(`🛡️ ${mint.slice(0, 4)} SCORE: ${score}`);
+
+                        if (score < 5000) {
+                            isPaused = true;
+                            bot.sendMessage(MY_ID, `🚀 SNIPING: ${mint}\nRug Score: ${score}`);
+                            await buyToken(mint);
+                            setTimeout(() => { isPaused = false; }, 60000);
+                        }
+                    } catch (rugErr) {
+                        // Silent fail for RugCheck busy signals to keep logs clean
+                    }
+                }
+            } catch (e) { }
+        })(); 
     }, 'processed');
 });
 
-console.log("🚀 APEX MASTER SYSTEM LIVE.");
+console.log("🚀 APEX PARALLEL SYSTEM ONLINE.");
