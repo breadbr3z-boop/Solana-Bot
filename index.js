@@ -1,7 +1,7 @@
 const { Connection, PublicKey, Keypair, VersionedTransaction, LAMPORTS_PER_SOL } = require('@solana/web3.js');
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
-const https = require('https'); // 🔑 Added for the SSL fix
+const https = require('https');
 const bs58 = require('bs58').default || require('bs58'); 
 require('dotenv').config();
 
@@ -12,37 +12,40 @@ const MY_ID = process.env.CHAT_ID;
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const JUP_IP = "https://74.125.22.103"; 
-
-// 🔑 THE SSL BYPASS AGENT (Fixes the "Cert Mismatch" error)
+const JUP_DNS = "https://quote-api.jup.ag"; // 🌐 Fallback path
 const agent = new https.Agent({ rejectUnauthorized: false });
 
 let isWorking = false;
 let subIds = [];
 
-// 🎯 WATCHDOG
+// 🎯 WATCHDOG (+50% / -30%)
 async function monitorPrice(mint, entryPrice, tokens) {
     const interval = setInterval(async () => {
         try {
-            const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${mint}&outputMint=${SOL_MINT}&amount=${tokens}&slippageBps=100`, { 
-                headers: { 'Host': 'quote-api.jup.ag' },
-                httpsAgent: agent 
-            });
+            // Try IP first, then DNS
+            let res;
+            try {
+                res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${mint}&outputMint=${SOL_MINT}&amount=${tokens}&slippageBps=100`, { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent });
+            } catch (e) {
+                res = await axios.get(`${JUP_DNS}/v6/quote?inputMint=${mint}&outputMint=${SOL_MINT}&amount=${tokens}&slippageBps=100`);
+            }
+            
             const currentPrice = parseFloat(res.data.outAmount) / tokens;
             if (currentPrice >= entryPrice * 1.5 || currentPrice <= entryPrice * 0.7) {
                 clearInterval(interval);
-                const swap = await axios.post(`${JUP_IP}/v6/swap`, { 
-                    quoteResponse: res.data, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 300000, dynamicComputeUnitLimit: true 
-                }, { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent });
+                const swapData = { quoteResponse: res.data, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 300000, dynamicComputeUnitLimit: true };
+                const swap = await axios.post(`${JUP_DNS}/v6/swap`, swapData).catch(() => axios.post(`${JUP_IP}/v6/swap`, swapData, { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent }));
+                
                 const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
                 tx.sign([wallet]);
                 await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-                bot.sendMessage(MY_ID, `🎯 EXIT: ${currentPrice >= entryPrice * 1.5 ? "PROFIT" : "LOSS"}`);
+                bot.sendMessage(MY_ID, `🎯 AUTO-SELL: ${currentPrice >= entryPrice * 1.5 ? "PROFIT" : "LOSS"}`);
             }
         } catch (e) { }
     }, 30000); 
 }
 
-// 🚀 THE V10 BUYER
+// 🚀 THE V11 BUYER (Dual-Path Execution)
 async function buyToken(mint) {
     try {
         console.log(`🛡️ Vetting: ${mint}`);
@@ -52,33 +55,30 @@ async function buyToken(mint) {
         const amount = Math.floor(0.01 * LAMPORTS_PER_SOL);
         let quote = null;
 
-        for (let i = 0; i < 5; i++) { 
+        for (let i = 0; i < 10; i++) { 
             try {
-                const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=2000`, { 
-                    headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' },
-                    httpsAgent: agent // 🔑 Applied here
-                });
+                // Dual-Path Quote Attempt
+                const url = i % 2 === 0 ? `${JUP_IP}/v6/quote` : `${JUP_DNS}/v6/quote`;
+                const config = i % 2 === 0 ? { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent } : {};
+                
+                const res = await axios.get(`${url}?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=2000`, config);
                 quote = res.data;
                 break; 
             } catch (e) { 
-                console.log(`🔄 Indexing... (${i+1}/5)`);
+                console.log(`🔄 Indexing... (${i+1}/10)`);
                 await new Promise(r => setTimeout(r, 3000)); 
             }
         }
 
-        if (!quote) {
-            console.log("🚨 Jupiter fallback triggered...");
-            await new Promise(r => setTimeout(r, 10000));
-            const retry = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=3000`, { 
-                headers: { 'Host': 'quote-api.jup.ag' }, 
-                httpsAgent: agent 
-            });
-            quote = retry.data;
-        }
+        if (!quote) throw new Error("Jupiter 404/Timeout");
 
-        const swap = await axios.post(`${JUP_IP}/v6/swap`, { 
-            quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 850000, dynamicComputeUnitLimit: true 
-        }, { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent });
+        // Dual-Path Swap Attempt
+        let swap;
+        try {
+            swap = await axios.post(`${JUP_DNS}/v6/swap`, { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 900000, dynamicComputeUnitLimit: true });
+        } catch (e) {
+            swap = await axios.post(`${JUP_IP}/v6/swap`, { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 900000, dynamicComputeUnitLimit: true }, { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent });
+        }
 
         const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
         tx.sign([wallet]);
@@ -118,5 +118,5 @@ async function toggleScanning(on) {
 
 process.on('uncaughtException', () => { isWorking = false; toggleScanning(true); });
 
-console.log("🚀 V10 MASTER: SSL-BYPASS ACTIVE. SLEEP NOW.");
+console.log("🚀 V11 FINAL: DUAL-PATH ACTIVE. GO TO SLEEP.");
 toggleScanning(true);
