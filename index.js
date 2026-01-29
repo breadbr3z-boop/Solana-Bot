@@ -5,7 +5,7 @@ const axios = require('axios');
 const bs58 = require('bs58').default || require('bs58'); 
 require('dotenv').config();
 
-// 1. DUAL-PIPE CONNECTION (Standard + WebSocket)
+// 1. DUAL-PIPE CONNECTION
 const connection = new Connection(process.env.RPC_URL, {
     wsEndpoint: process.env.WSS_URL, 
     commitment: 'processed'
@@ -19,51 +19,36 @@ const MY_ID = process.env.CHAT_ID;
 const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 let scanHistory = [];
+let isPaused = false; // 🛑 Cooldown Variable
 
-// 🔥 INDEPENDENT HEARTBEAT
+// 🔥 HEARTBEAT
 const heartbeat = setInterval(() => {
-    console.log(`💓 Heartbeat: ${new Date().toLocaleTimeString()} | Bot Engine Healthy`);
+    console.log(`💓 Heartbeat: ${new Date().toLocaleTimeString()} | Testing Mode Active`);
 }, 60000);
 heartbeat.unref(); 
 
-// 📢 COMMAND LISTENER
+// 📢 COMMANDS
 bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const text = msg.text?.toLowerCase();
 
-    if (text === '/start' || text === 'ping') {
-        bot.sendMessage(chatId, "👋 Connection verified! I am scanning Solana Raydium launches...");
-    } 
-    else if (text === '/status') {
-        try {
-            const version = await connection.getVersion();
-            bot.sendMessage(chatId, `📊 Status: ONLINE\n🧬 Node: ${version["solana-core"]}\n🛡️ Filter: RugCheck < 500\n🚀 Priority: AUTO`);
-        } catch (e) { bot.sendMessage(chatId, "⚠️ Status: DEGRADED"); }
+    if (text === '/status') {
+        const version = await connection.getVersion().catch(() => ({ "solana-core": "Error" }));
+        bot.sendMessage(chatId, `📊 Status: TESTING MODE\n🛡️ Filter: < 5000\n⏳ Cooldown: ${isPaused ? "ACTIVE" : "READY"}`);
     } 
     else if (text === '/balance') {
-        try {
-            const bal = await connection.getBalance(wallet.publicKey);
-            bot.sendMessage(chatId, `💰 Wallet: ${(bal / LAMPORTS_PER_SOL).toFixed(4)} SOL`);
-        } catch (e) { bot.sendMessage(chatId, "❌ Balance check failed."); }
+        const bal = await connection.getBalance(wallet.publicKey).catch(() => 0);
+        bot.sendMessage(chatId, `💰 Wallet: ${(bal / LAMPORTS_PER_SOL).toFixed(4)} SOL`);
     } 
     else if (text === '/log') {
-        if (scanHistory.length === 0) bot.sendMessage(chatId, "📁 Log empty. No new pools detected since restart.");
+        if (scanHistory.length === 0) bot.sendMessage(chatId, "📁 Log empty.");
         else {
-            const report = scanHistory.map(h => `📍 ${h.time} | Score: ${h.score} | ${h.action}\nMint: ${h.mint.slice(0, 10)}...`).join('\n\n');
+            const report = scanHistory.map(h => `📍 ${h.time} | Score: ${h.score} | ${h.action}`).join('\n\n');
             bot.sendMessage(chatId, `📋 Recent Activity:\n\n${report}`);
         }
     }
-    // 🧪 NEW: TEST LOG COMMAND
     else if (text === '/testlog') {
-        const fakeMint = "TEST_MINT_" + Math.floor(Math.random() * 1000);
-        const fakeScore = Math.floor(Math.random() * 1000);
-        const action = fakeScore < 500 ? "✅ BOUGHT (Simulated)" : "❌ SKIPPED (Simulated)";
-        
-        scanHistory.unshift({ time: new Date().toLocaleTimeString(), mint: fakeMint, score: fakeScore, action: action });
-        if (scanHistory.length > 5) scanHistory.pop();
-        
-        bot.sendMessage(chatId, `🧪 TEST ALERT:\nDetected: ${fakeMint}\nSafety Score: ${fakeScore}\nAction: ${action}\n\n*Check /log to see this entry!*`);
-        console.log("🛠️ Manual Test Log Triggered");
+        bot.sendMessage(chatId, "🧪 Test Alert Received! Pipe is working.");
     }
 });
 
@@ -81,7 +66,7 @@ async function sellToken(mint, amountTokens) {
     } catch (e) { console.error("🚨 Sell Failed:", e.message); }
 }
 
-// 3. MONITORING LOOP
+// 3. MONITORING
 async function startMonitoring(mint, entryPrice, tokenBalance) {
     const interval = setInterval(async () => {
         try {
@@ -115,28 +100,33 @@ async function buyToken(mint, amountSol = 0.05) {
     }
 }
 
-// 5. SCANNER (The Listening Engine)
+// 5. SCANNER
 connection.onLogs(RAYDIUM_ID, async ({ logs, signature, err }) => {
     console.log(`👀 Activity: ${signature.slice(0, 8)}...`);
-    if (err || !logs.some(log => log.includes("initialize2"))) return;
+    if (isPaused || err || !logs.some(log => log.includes("initialize2"))) return;
 
     try {
-        console.log(`💎 NEW POOL DETECTED: ${signature}`);
         const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0 });
         const tokenMint = tx?.transaction.message.instructions.find(ix => ix.programId.equals(RAYDIUM_ID))?.accounts[8].toBase58();
 
         const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, { timeout: 5000 });
         const score = rug.data.score;
-        const action = score < 500 ? "✅ BOUGHT" : "❌ SKIPPED";
-
+        
+        // 🧪 CHAOS MODE: SCORE < 5000
+        const action = score < 5000 ? "✅ BOUGHT" : "❌ SKIPPED";
         scanHistory.unshift({ time: new Date().toLocaleTimeString(), mint: tokenMint, score: score, action: action });
-        if (scanHistory.length > 5) scanHistory.pop();
 
-        if (score < 500) {
-            bot.sendMessage(MY_ID, `🚀 SNIPING SAFE TOKEN: ${tokenMint}\nScore: ${score}`);
+        if (score < 5000) {
+            isPaused = true; // 🛑 START COOLDOWN
+            bot.sendMessage(MY_ID, `🚀 TEST BUY: ${tokenMint}\nScore: ${score}`);
             await buyToken(tokenMint);
+            
+            setTimeout(() => { 
+                isPaused = false; 
+                console.log("🔓 Cooldown over."); 
+            }, 60000); // 1 minute break
         }
     } catch (e) { }
 }, 'processed');
 
-console.log("🚀 MASTER BOT WITH TEST LOGS LIVE.");
+console.log("🚀 TESTING MODE LIVE. Score < 5000, 60s Cooldown.");
