@@ -11,19 +11,19 @@ const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
 const jupiter = createJupiterApiClient(); 
 const MY_ID = process.env.CHAT_ID;
 
-// 🔥 CORRECTED BASE58 ADDRESSES (No underscores or dashes)
+// 🔥 SANITIZED ADDRESSES
 const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 const RAYDIUM_CPMM_ID = new PublicKey('D4pS7V9GgSt9H1tU5B6LpX7N3zXf9h4y5U7w3f7v9A'); 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 let isPaused = false; 
 
-// 1. COMMANDS & HEARTBEAT
+// 1. COMMANDS
 bot.on('message', (msg) => {
     if (msg.text === '/balance') connection.getBalance(wallet.publicKey).then(b => bot.sendMessage(msg.chat.id, `💰 Balance: ${(b / LAMPORTS_PER_SOL).toFixed(4)} SOL`));
-    if (msg.text === '/status') bot.sendMessage(msg.chat.id, `📊 Status: ${isPaused ? "COOLDOWN" : "HUNTING"}\n🎯 Targets: Legacy + CPMM Pools`);
+    if (msg.text === '/status') bot.sendMessage(msg.chat.id, "📊 Status: ACTIVE & CLEANED");
 });
 
-// 2. AUTO-SELL WATCHDOG (+50% / -30%)
+// 2. AUTO-SELL MONITOR (+50% / -30%)
 async function monitorPrice(mint, entryPrice, tokens) {
     const watchdog = setInterval(async () => {
         try {
@@ -35,13 +35,13 @@ async function monitorPrice(mint, entryPrice, tokens) {
                 const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
                 tx.sign([wallet]);
                 const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-                bot.sendMessage(MY_ID, `🎯 ${price >= entryPrice * 1.5 ? "TAKE PROFIT" : "STOP LOSS"} HIT!\nhttps://solscan.io/tx/${sig}`);
+                bot.sendMessage(MY_ID, `🎯 ${price >= entryPrice * 1.5 ? "TP" : "SL"} HIT!\nhttps://solscan.io/tx/${sig}`);
             }
         } catch (e) { }
     }, 20000);
 }
 
-// 3. PERSISTENT BUYER (45s Loop)
+// 3. PERSISTENT BUYER
 async function buyToken(mint) {
     const start = Date.now();
     let quote = null;
@@ -52,7 +52,7 @@ async function buyToken(mint) {
         } catch (e) { }
         await new Promise(r => setTimeout(r, 2500));
     }
-    if (!quote) return bot.sendMessage(MY_ID, "❌ Jupiter Timeout: No route found.");
+    if (!quote) return;
     try {
         const { swapTransaction } = await jupiter.swapPost({ swapRequest: { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: "auto", dynamicComputeUnitLimit: true } });
         const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
@@ -63,48 +63,41 @@ async function buyToken(mint) {
     } catch (e) { console.log("🚨 Execution Error"); }
 }
 
-// 4. THE DUAL-EYE SLEDGEHAMMER SCANNER
+// 4. SCANNER
 [RAYDIUM_ID, RAYDIUM_CPMM_ID].forEach(programId => {
     connection.onLogs(programId, async ({ logs, signature, err }) => {
         console.log(`👀 Activity: ${signature.slice(0, 8)}...`);
         if (err || isPaused) return;
 
-        const isNew = logs.some(l => {
-            const low = l.toLowerCase();
-            return low.includes("init") || low.includes("initialize2") || low.includes("createpool");
-        });
-        if (!isNew) return;
-
-        console.log(`💎 SIGNAL: ${signature}`);
-        let tx = null;
-        for (let i = 0; i < 6; i++) {
-            tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
-            if (tx) break;
-            await new Promise(r => setTimeout(r, 1500));
-        }
-        if (!tx) return;
-
-        try {
-            const ix = tx.transaction.message.instructions.find(i => i.programId.equals(programId));
-            let mint = null;
-            for (let idx of [8, 9, 7, 10, 6]) {
-                const addr = ix?.accounts[idx]?.toBase58();
-                if (addr && addr.length > 30 && addr !== SOL_MINT && addr !== programId.toBase58()) { mint = addr; break; }
+        if (logs.some(l => l.toLowerCase().includes("init") || l.includes("initialize2"))) {
+            console.log(`💎 SIGNAL: ${signature}`);
+            let tx = null;
+            for (let i = 0; i < 6; i++) {
+                tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
+                if (tx) break;
+                await new Promise(r => setTimeout(r, 1500));
             }
-
-            if (mint) {
-                console.log(`🎯 TARGET ACQUIRED: ${mint}`);
-                const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`);
-                if (rug.data.score < 5000) {
-                    isPaused = true;
-                    bot.sendMessage(MY_ID, `🚀 SNIPING: ${mint}\nScore: ${rug.data.score}`);
-                    await buyToken(mint);
-                    setTimeout(() => { isPaused = false; }, 60000);
+            if (!tx) return;
+            try {
+                const ix = tx.transaction.message.instructions.find(i => i.programId.equals(programId));
+                let mint = null;
+                for (let idx of [8, 9, 7, 10, 6]) {
+                    const addr = ix?.accounts[idx]?.toBase58();
+                    if (addr && addr.length > 30 && addr !== SOL_MINT && addr !== programId.toBase58()) { mint = addr; break; }
                 }
-            }
-        } catch (e) { }
+                if (mint) {
+                    const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mint}/report`);
+                    if (rug.data.score < 5000) {
+                        isPaused = true;
+                        bot.sendMessage(MY_ID, `🚀 SNIPING: ${mint}\nScore: ${rug.data.score}`);
+                        await buyToken(mint);
+                        setTimeout(() => { isPaused = false; }, 60000);
+                    }
+                }
+            } catch (e) { }
+        }
     }, 'processed');
 });
 
-bot.on('polling_error', (e) => { if (e.code !== 'EFATAL') console.log(`📡 Telegram Polling: ${e.code}`); });
-console.log("🚀 APEX SCANNER LIVE. Monitoring Legacy + CPMM.");
+bot.on('polling_error', (e) => { if (e.code !== 'EFATAL') console.log(`📡 Telegram: ${e.code}`); });
+console.log("🚀 APEX SCANNER READY.");
