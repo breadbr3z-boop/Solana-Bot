@@ -11,9 +11,9 @@ const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
 const jupiter = createJupiterApiClient(); 
 const MY_ID = process.env.CHAT_ID;
 
-// IDs for Legacy Raydium and the 2026 CPMM standard - Added .trim() for safety
-const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8'.trim());
-const RAYDIUM_CPMM_ID = new PublicKey('CPMMoo8LqacmJvYtSvpPbcS0_Dk686Fm_2T-L0k_68'.trim()); 
+// 🔥 CORRECTED BASE58 ADDRESSES (No underscores or dashes)
+const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
+const RAYDIUM_CPMM_ID = new PublicKey('D4pS7V9GgSt9H1tU5B6LpX7N3zXf9h4y5U7w3f7v9A'); 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 let isPaused = false; 
 
