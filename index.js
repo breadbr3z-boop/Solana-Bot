@@ -4,66 +4,55 @@ const axios = require('axios');
 const bs58 = require('bs58').default || require('bs58'); 
 require('dotenv').config();
 
-// 1. DIRECT-PATH SETUP
-const connection = new Connection(process.env.RPC_URL, { wsEndpoint: process.env.WSS_URL, commitment: 'confirmed' });
+// 1. SETUP & PROXY CONFIG
+const HELIUS_RPC = process.env.RPC_URL.trim();
+const connection = new Connection(HELIUS_RPC, { wsEndpoint: process.env.WSS_URL, commitment: 'confirmed' });
 const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY.trim()));
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN.trim(), { polling: true });
+
+// Convert RPC URL to Helius API Proxy URL
+const JUP_PROXY = `${HELIUS_RPC.replace('rpc', 'api').split('?')[0]}/jup/quote${HELIUS_RPC.includes('api-key') ? '?api-key=' + HELIUS_RPC.split('api-key=')[1] : ''}`;
+const SWAP_PROXY = `${HELIUS_RPC.replace('rpc', 'api').split('?')[0]}/jup/swap${HELIUS_RPC.includes('api-key') ? '?api-key=' + HELIUS_RPC.split('api-key=')[1] : ''}`;
 
 const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 const RAYDIUM_CPMM_ID = new PublicKey('CAMMCzoKmcEB3snv69UC796S3hZpkS7vBrN3shvkk9A'); 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-// 🌐 HARD-RESOLVED JUPITER ENDPOINTS
-// Using the direct API gateway to bypass Railway's DNS issues
-const JUP_BASE = "https://quote-api.jup.ag/v6";
-
 let isWorking = false;
 let subIds = [];
 
-// 2. THE DIRECT BUYER
+// 2. THE PROXY BUYER
 async function buyToken(mint) {
     try {
-        console.log(`📡 Direct Quoting: ${mint.slice(0, 6)}...`);
+        console.log(`📡 Helius Proxy Quote: ${mint.slice(0, 6)}...`);
         
-        // 🛡️ Added specific headers to bypass Cloudflare/DNS blocks
-        const quoteRes = await axios.get(`${JUP_BASE}/quote`, {
-            params: {
-                inputMint: SOL_MINT,
-                outputMint: mint,
-                amount: Math.floor(0.01 * LAMPORTS_PER_SOL),
-                slippageBps: 5000
-            },
-            headers: { 
-                'User-Agent': 'Mozilla/5.0',
-                'Accept': 'application/json'
-            },
-            timeout: 8000
-        });
+        // Use Helius as the middleman to talk to Jupiter
+        const quoteRes = await axios.get(JUP_PROXY + (JUP_PROXY.includes('?') ? '&' : '?') + `inputMint=${SOL_MINT}&outputMint=${mint}&amount=${Math.floor(0.01 * LAMPORTS_PER_SOL)}&slippageBps=5000`, { timeout: 10000 });
+        
+        if (!quoteRes.data) throw new Error("Proxy returned empty quote");
 
-        if (!quoteRes.data) throw new Error("DNS/API Blocked");
-
-        const swapRes = await axios.post(`${JUP_BASE}/swap`, {
+        const swapRes = await axios.post(SWAP_PROXY, {
             quoteResponse: quoteRes.data,
             userPublicKey: wallet.publicKey.toBase58(),
             wrapAndUnwrapSol: true,
-            prioritizationFeeLamports: 300000 // Heavy priority to force the trade through
-        }, { timeout: 10000 });
+            prioritizationFeeLamports: 350000 
+        }, { timeout: 12000 });
 
         const tx = VersionedTransaction.deserialize(Buffer.from(swapRes.data.swapTransaction, 'base64'));
         tx.sign([wallet]);
         
-        const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
+        const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true, maxRetries: 3 });
         
-        const successMsg = `🚀 TRADE LANDED! https://solscan.io/tx/${sig}`;
-        console.log(successMsg);
-        if (process.env.CHAT_ID) bot.sendMessage(process.env.CHAT_ID, successMsg);
+        const msg = `🚀 PROXY BUY SUCCESS!\nhttps://solscan.io/tx/${sig}`;
+        console.log(msg);
+        if (process.env.CHAT_ID) bot.sendMessage(process.env.CHAT_ID, msg);
 
     } catch (e) {
-        console.log(`🚨 Connectivity Error: ${e.code === 'ENOTFOUND' ? "Railway DNS Blocked - Retrying Path..." : e.message}`);
+        console.log(`🚨 Proxy Fail: ${e.response?.data?.error || e.message}`);
     }
 }
 
-// 3. SCANNER
+// 3. SCANNER LOGIC
 async function toggleScanning(on) {
     if (!on) {
         for (let id of subIds) await connection.removeOnLogsListener(id).catch(() => {});
@@ -76,7 +65,7 @@ async function toggleScanning(on) {
                 isWorking = true;
                 await toggleScanning(false); 
 
-                console.log(`🎯 TARGET ACQUIRED: ${signature.slice(0, 8)}`);
+                console.log(`🎯 TARGET: ${signature.slice(0, 8)}`);
                 try {
                     const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
                     if (tx) {
@@ -93,7 +82,7 @@ async function toggleScanning(on) {
                     }
                 } catch (e) { }
 
-                console.log("⏳ System Resetting (45s)...");
+                console.log("⏳ Cooldown 45s...");
                 setTimeout(() => { isWorking = false; toggleScanning(true); }, 45000);
             }, 'processed');
             subIds.push(id);
@@ -101,10 +90,11 @@ async function toggleScanning(on) {
     }
 }
 
-process.on('uncaughtException', (err) => {
-    isWorking = false;
-    toggleScanning(true);
+// Global Cleanup
+process.on('SIGTERM', () => {
+    bot.stopPolling();
+    process.exit(0);
 });
 
-console.log("🚀 APEX DIRECT-PATH ONLINE.");
+console.log("🚀 PROXY APEX ONLINE.");
 toggleScanning(true);
