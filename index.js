@@ -17,7 +17,7 @@ const JUP_IP = "https://74.125.22.103";
 let isWorking = false;
 let subIds = [];
 
-// 🎯 WATCHDOG
+// 🎯 EXIT STRATEGY (+50% / -30%)
 async function monitorPrice(mint, entryPrice, tokens) {
     const interval = setInterval(async () => {
         try {
@@ -29,13 +29,13 @@ async function monitorPrice(mint, entryPrice, tokens) {
                 const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
                 tx.sign([wallet]);
                 await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-                bot.sendMessage(MY_ID, `🎯 EXIT: ${currentPrice >= entryPrice * 1.5 ? "PROFIT" : "LOSS"}`);
+                bot.sendMessage(MY_ID, `🎯 EXIT: ${currentPrice >= entryPrice * 1.5 ? "PROFIT 🚀" : "LOSS 📉"}`);
             }
         } catch (e) { }
-    }, 20000); 
+    }, 30000); 
 }
 
-// 🚀 THE CORRECTED BUYER
+// 🚀 THE "ULTIMATE" BUYER
 async function buyToken(mint) {
     try {
         console.log(`🛡️ Vetting: ${mint}`);
@@ -45,24 +45,29 @@ async function buyToken(mint) {
         const amount = Math.floor(0.01 * LAMPORTS_PER_SOL);
         let quote = null;
 
-        for (let i = 0; i < 8; i++) { // Increased retries for indexing
+        // Force a 5 second wait before even asking Jupiter to allow sync
+        await new Promise(r => setTimeout(r, 5000));
+
+        for (let i = 0; i < 10; i++) { 
             try {
-                const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=1500`, { headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } });
+                const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=2000`, { 
+                    headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } 
+                });
                 quote = res.data;
                 break; 
             } catch (e) { 
-                console.log("🔄 Waiting for Jupiter Index...");
+                console.log(`🔄 Indexing Retry ${i+1}...`);
                 await new Promise(r => setTimeout(r, 3000)); 
             }
         }
 
-        if (!quote) throw new Error("Jupiter Timeout");
+        if (!quote) throw new Error("Jupiter Indexing Failure");
 
         const swap = await axios.post(`${JUP_IP}/v6/swap`, { 
             quoteResponse: quote, 
             userPublicKey: wallet.publicKey.toBase58(), 
             wrapAndUnwrapSol: true, 
-            prioritizationFeeLamports: 600000,
+            prioritizationFeeLamports: 700000, // Even higher priority
             dynamicComputeUnitLimit: true 
         }, { headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } });
 
@@ -70,7 +75,7 @@ async function buyToken(mint) {
         tx.sign([wallet]);
         const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
         
-        bot.sendMessage(MY_ID, `💎 SNIPE! https://solscan.io/tx/${sig}`);
+        bot.sendMessage(MY_ID, `💎 SNIPE LANDED! https://solscan.io/tx/${sig}`);
         monitorPrice(mint, amount / parseFloat(quote.outAmount), quote.outAmount);
         
     } catch (e) { console.log(`🚨 Buy Fail: ${e.response?.data?.error || e.message}`); }
@@ -86,13 +91,24 @@ async function toggleScanning(on) {
                 if (isWorking || err || !logs.some(l => l.toLowerCase().includes("init"))) return;
                 isWorking = true;
                 await toggleScanning(false); 
+                
                 try {
                     const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
                     if (tx) {
-                        // 🛠️ HARDENED MINT DETECTION
-                        // Look for the token that is NOT SOL and NOT the program/vault
-                        const meta = tx.meta.postTokenBalances;
-                        const mint = meta.find(m => m.mint !== SOL_MINT && m.owner !== pId.toBase58())?.mint;
+                        // 🛠️ FAIL-SAFE MINT DETECTION
+                        // We check the accounts and filter out everything we know is NOT the coin
+                        const accounts = tx.transaction.message.accountKeys.map(k => k.pubkey.toBase58());
+                        const mint = accounts.find(a => 
+                            a !== SOL_MINT && 
+                            a !== pId.toBase58() && 
+                            a !== wallet.publicKey.toBase58() && 
+                            !a.startsWith('1111') && 
+                            !a.startsWith('Tokenkeg') &&
+                            !a.startsWith('Sysvar') &&
+                            !a.startsWith('AToken') &&
+                            !a.startsWith('Compute') &&
+                            !a.startsWith('Config')
+                        );
                         
                         if (mint) {
                             console.log(`🎯 TARGET DETECTED: ${mint}`);
@@ -100,7 +116,7 @@ async function toggleScanning(on) {
                         }
                     }
                 } catch (e) { }
-                setTimeout(() => { isWorking = false; toggleScanning(true); }, 30000);
+                setTimeout(() => { isWorking = false; toggleScanning(true); }, 45000);
             }, 'processed');
             subIds.push(id);
         });
@@ -109,5 +125,5 @@ async function toggleScanning(on) {
 
 process.on('uncaughtException', () => { isWorking = false; toggleScanning(true); });
 
-console.log("🚀 SLEDGEHAMMER V6: MINT-SENSING ACTIVE.");
+console.log("🚀 SLEDGEHAMMER V7: FINAL DEPLOYMENT. SLEEP NOW.");
 toggleScanning(true);
