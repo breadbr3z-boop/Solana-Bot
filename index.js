@@ -19,11 +19,11 @@ const MY_ID = process.env.CHAT_ID;
 const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 let scanHistory = [];
-let isPaused = false; // 🛑 Cooldown Variable
+let isPaused = false; 
 
-// 🔥 HEARTBEAT
+// 🔥 HEARTBEAT (1 Minute)
 const heartbeat = setInterval(() => {
-    console.log(`💓 Heartbeat: ${new Date().toLocaleTimeString()} | Testing Mode Active`);
+    console.log(`💓 Heartbeat: ${new Date().toLocaleTimeString()} | Testing Mode (0.01 SOL)`);
 }, 60000);
 heartbeat.unref(); 
 
@@ -34,7 +34,7 @@ bot.on('message', async (msg) => {
 
     if (text === '/status') {
         const version = await connection.getVersion().catch(() => ({ "solana-core": "Error" }));
-        bot.sendMessage(chatId, `📊 Status: TESTING MODE\n🛡️ Filter: < 5000\n⏳ Cooldown: ${isPaused ? "ACTIVE" : "READY"}`);
+        bot.sendMessage(chatId, `📊 Status: TESTING MODE\n💰 Buy: 0.01 SOL\n🛡️ Filter: < 5000\n⏳ Cooldown: ${isPaused ? "ACTIVE" : "READY"}`);
     } 
     else if (text === '/balance') {
         const bal = await connection.getBalance(wallet.publicKey).catch(() => 0);
@@ -48,11 +48,11 @@ bot.on('message', async (msg) => {
         }
     }
     else if (text === '/testlog') {
-        bot.sendMessage(chatId, "🧪 Test Alert Received! Pipe is working.");
+        bot.sendMessage(chatId, "🧪 Test Alert Received! Notification pipe is active.");
     }
 });
 
-// 2. SELL FUNCTION
+// 2. SELL FUNCTION (Includes Priority Fee)
 async function sellToken(mint, amountTokens) {
     try {
         const quote = await jupiter.quoteGet({ inputMint: mint, outputMint: SOL_MINT, amount: amountTokens.toString(), slippageBps: 2000 });
@@ -66,7 +66,7 @@ async function sellToken(mint, amountTokens) {
     } catch (e) { console.error("🚨 Sell Failed:", e.message); }
 }
 
-// 3. MONITORING
+// 3. MONITORING (+50% / -30%)
 async function startMonitoring(mint, entryPrice, tokenBalance) {
     const interval = setInterval(async () => {
         try {
@@ -79,8 +79,8 @@ async function startMonitoring(mint, entryPrice, tokenBalance) {
     }, 15000);
 }
 
-// 4. BUY FUNCTION
-async function buyToken(mint, amountSol = 0.05) {
+// 4. BUY FUNCTION (Updated to 0.01 SOL)
+async function buyToken(mint, amountSol = 0.01) {
     try {
         console.log(`⏳ Waiting 5s for liquidity...`);
         await new Promise(r => setTimeout(r, 5000)); 
@@ -92,7 +92,8 @@ async function buyToken(mint, amountSol = 0.05) {
         const transaction = VersionedTransaction.deserialize(Buffer.from(swapTransaction, 'base64'));
         transaction.sign([wallet]);
         const signature = await connection.sendRawTransaction(transaction.serialize(), { skipPreflight: true });
-        bot.sendMessage(MY_ID, `✅ BOUGHT: ${mint}\nTX: https://solscan.io/tx/${signature}`);
+        
+        bot.sendMessage(MY_ID, `✅ BOUGHT 0.01 SOL: ${mint}\nTX: https://solscan.io/tx/${signature}`);
         startMonitoring(mint, (parseFloat(amountInLamports) / parseFloat(quote.outAmount)), quote.outAmount);
     } catch (e) { 
         console.error("🚨 Buy Error:", e.message);
@@ -100,7 +101,7 @@ async function buyToken(mint, amountSol = 0.05) {
     }
 }
 
-// 5. SCANNER
+// 5. SCANNER (The Listening Engine)
 connection.onLogs(RAYDIUM_ID, async ({ logs, signature, err }) => {
     console.log(`👀 Activity: ${signature.slice(0, 8)}...`);
     if (isPaused || err || !logs.some(log => log.includes("initialize2"))) return;
@@ -112,21 +113,21 @@ connection.onLogs(RAYDIUM_ID, async ({ logs, signature, err }) => {
         const rug = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${tokenMint}/report`, { timeout: 5000 });
         const score = rug.data.score;
         
-        // 🧪 CHAOS MODE: SCORE < 5000
+        // 🧪 TEST MODE: BUY NEARLY ANYTHING
         const action = score < 5000 ? "✅ BOUGHT" : "❌ SKIPPED";
         scanHistory.unshift({ time: new Date().toLocaleTimeString(), mint: tokenMint, score: score, action: action });
 
         if (score < 5000) {
-            isPaused = true; // 🛑 START COOLDOWN
-            bot.sendMessage(MY_ID, `🚀 TEST BUY: ${tokenMint}\nScore: ${score}`);
+            isPaused = true; 
+            bot.sendMessage(MY_ID, `🚀 TEST BUY (0.01 SOL): ${tokenMint}\nScore: ${score}`);
             await buyToken(tokenMint);
             
             setTimeout(() => { 
                 isPaused = false; 
-                console.log("🔓 Cooldown over."); 
-            }, 60000); // 1 minute break
+                console.log("🔓 Cooldown over. Ready for next test."); 
+            }, 60000); 
         }
     } catch (e) { }
 }, 'processed');
 
-console.log("🚀 TESTING MODE LIVE. Score < 5000, 60s Cooldown.");
+console.log("🚀 TESTING MODE LIVE (0.01 SOL). Filter < 5000.");
