@@ -17,7 +17,7 @@ const JUP_IP = "https://74.125.22.103";
 let isWorking = false;
 let subIds = [];
 
-// 🎯 EXIT STRATEGY (+50% / -30%)
+// 🎯 WATCHDOG
 async function monitorPrice(mint, entryPrice, tokens) {
     const interval = setInterval(async () => {
         try {
@@ -35,7 +35,7 @@ async function monitorPrice(mint, entryPrice, tokens) {
     }, 30000); 
 }
 
-// 🚀 THE "ULTIMATE" BUYER
+// 🚀 THE "FORCED-SYNC" BUYER
 async function buyToken(mint) {
     try {
         console.log(`🛡️ Vetting: ${mint}`);
@@ -45,29 +45,34 @@ async function buyToken(mint) {
         const amount = Math.floor(0.01 * LAMPORTS_PER_SOL);
         let quote = null;
 
-        // Force a 5 second wait before even asking Jupiter to allow sync
-        await new Promise(r => setTimeout(r, 5000));
+        // 🛠️ HELIUS FORCE-SYNC: Ensure the mint is indexed on the blockchain
+        console.log("🔗 Syncing with Helius...");
+        for (let i = 0; i < 5; i++) {
+            const asset = await axios.post(process.env.RPC_URL, { jsonrpc: "2.0", id: "sync", method: "getAsset", params: { id: mint } }).catch(() => null);
+            if (asset?.data?.result) break;
+            await new Promise(r => setTimeout(r, 2000));
+        }
 
-        for (let i = 0; i < 10; i++) { 
+        for (let i = 0; i < 12; i++) { // Massive retry window
             try {
-                const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=2000`, { 
+                const res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=2500`, { 
                     headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } 
                 });
                 quote = res.data;
                 break; 
             } catch (e) { 
-                console.log(`🔄 Indexing Retry ${i+1}...`);
+                console.log(`🔄 Jupiter Indexing... (Attempt ${i+1}/12)`);
                 await new Promise(r => setTimeout(r, 3000)); 
             }
         }
 
-        if (!quote) throw new Error("Jupiter Indexing Failure");
+        if (!quote) throw new Error("Jupiter Timeout - Mint not tradable yet");
 
         const swap = await axios.post(`${JUP_IP}/v6/swap`, { 
             quoteResponse: quote, 
             userPublicKey: wallet.publicKey.toBase58(), 
             wrapAndUnwrapSol: true, 
-            prioritizationFeeLamports: 700000, // Even higher priority
+            prioritizationFeeLamports: 800000,
             dynamicComputeUnitLimit: true 
         }, { headers: { 'Host': 'quote-api.jup.ag', 'User-Agent': 'Mozilla/5.0' } });
 
@@ -95,20 +100,8 @@ async function toggleScanning(on) {
                 try {
                     const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
                     if (tx) {
-                        // 🛠️ FAIL-SAFE MINT DETECTION
-                        // We check the accounts and filter out everything we know is NOT the coin
-                        const accounts = tx.transaction.message.accountKeys.map(k => k.pubkey.toBase58());
-                        const mint = accounts.find(a => 
-                            a !== SOL_MINT && 
-                            a !== pId.toBase58() && 
-                            a !== wallet.publicKey.toBase58() && 
-                            !a.startsWith('1111') && 
-                            !a.startsWith('Tokenkeg') &&
-                            !a.startsWith('Sysvar') &&
-                            !a.startsWith('AToken') &&
-                            !a.startsWith('Compute') &&
-                            !a.startsWith('Config')
-                        );
+                        // 🛠️ ULTIMATE MINT DETECTION: Pull from the actual token balances
+                        const mint = tx.meta.postTokenBalances.find(b => b.mint !== SOL_MINT && b.owner !== pId.toBase58())?.mint;
                         
                         if (mint) {
                             console.log(`🎯 TARGET DETECTED: ${mint}`);
@@ -125,5 +118,5 @@ async function toggleScanning(on) {
 
 process.on('uncaughtException', () => { isWorking = false; toggleScanning(true); });
 
-console.log("🚀 SLEDGEHAMMER V7: FINAL DEPLOYMENT. SLEEP NOW.");
+console.log("🚀 SLEDGEHAMMER V8: FINAL SYNC ENABLED. SHUT DOWN NOW.");
 toggleScanning(true);
