@@ -5,25 +5,26 @@ const axios = require('axios');
 const bs58 = require('bs58').default || require('bs58'); 
 require('dotenv').config();
 
+// 1. SETUP
 const connection = new Connection(process.env.RPC_URL, { wsEndpoint: process.env.WSS_URL, commitment: 'processed' });
-const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
-const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
+const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY.trim()));
+const bot = new TelegramBot(process.env.TELEGRAM_TOKEN.trim(), { polling: true });
 const jupiter = createJupiterApiClient(); 
 const MY_ID = process.env.CHAT_ID;
 
-// 🔥 SANITIZED ADDRESSES
-const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
-const RAYDIUM_CPMM_ID = new PublicKey('D4pS7V9GgSt9H1tU5B6LpX7N3zXf9h4y5U7w3f7v9A'); 
+// 🔥 DEEP-CLEANED ADDRESSES
+const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8'.replace(/[^a-zA-Z0-9]/g, ''));
+const RAYDIUM_CPMM_ID = new PublicKey('D4pS7V9GgSt9H1tU5B6LpX7N3zXf9h4y5U7w3f7v9A'.replace(/[^a-zA-Z0-9]/g, '')); 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 let isPaused = false; 
 
-// 1. COMMANDS
+// 2. COMMANDS
 bot.on('message', (msg) => {
     if (msg.text === '/balance') connection.getBalance(wallet.publicKey).then(b => bot.sendMessage(msg.chat.id, `💰 Balance: ${(b / LAMPORTS_PER_SOL).toFixed(4)} SOL`));
     if (msg.text === '/status') bot.sendMessage(msg.chat.id, "📊 Status: ACTIVE & CLEANED");
 });
 
-// 2. AUTO-SELL MONITOR (+50% / -30%)
+// 3. AUTO-SELL MONITOR (+50% / -30%)
 async function monitorPrice(mint, entryPrice, tokens) {
     const watchdog = setInterval(async () => {
         try {
@@ -41,7 +42,7 @@ async function monitorPrice(mint, entryPrice, tokens) {
     }, 20000);
 }
 
-// 3. PERSISTENT BUYER
+// 4. PERSISTENT BUYER
 async function buyToken(mint) {
     const start = Date.now();
     let quote = null;
@@ -63,7 +64,7 @@ async function buyToken(mint) {
     } catch (e) { console.log("🚨 Execution Error"); }
 }
 
-// 4. SCANNER
+// 5. SCANNER
 [RAYDIUM_ID, RAYDIUM_CPMM_ID].forEach(programId => {
     connection.onLogs(programId, async ({ logs, signature, err }) => {
         console.log(`👀 Activity: ${signature.slice(0, 8)}...`);
@@ -99,5 +100,4 @@ async function buyToken(mint) {
     }, 'processed');
 });
 
-bot.on('polling_error', (e) => { if (e.code !== 'EFATAL') console.log(`📡 Telegram: ${e.code}`); });
 console.log("🚀 APEX SCANNER READY.");
