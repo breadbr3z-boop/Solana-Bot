@@ -4,10 +4,10 @@ const axios = require('axios');
 const bs58 = require('bs58').default || require('bs58'); 
 require('dotenv').config();
 
-// 1. SYSTEM SETUP
 const connection = new Connection(process.env.RPC_URL, { wsEndpoint: process.env.WSS_URL, commitment: 'confirmed' });
 const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY.trim()));
 const bot = new TelegramBot(process.env.TELEGRAM_TOKEN.trim(), { polling: true });
+const MY_ID = process.env.CHAT_ID;
 
 const RAYDIUM_ID = new PublicKey('675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8');
 const RAYDIUM_CPMM_ID = new PublicKey('CAMMCzoKmcEB3snv69UC796S3hZpkS7vBrN3shvkk9A'); 
@@ -16,45 +16,39 @@ const SOL_MINT = "So11111111111111111111111111111111111111112";
 let isWorking = false;
 let subIds = [];
 
-// 2. THE AGGRESSIVE BUYER (Multi-Endpoint Fallback)
+// 🛡️ THE FINAL BUYER (IP-DIRECT FALLBACK)
 async function buyToken(mint) {
-    // Try these in order: API 1, then API 2
-    const endpoints = [
+    const urls = [
         "https://quote-api.jup.ag/v6",
         "https://api.jup.ag/swap/v6"
     ];
 
-    for (const api of endpoints) {
+    for (let url of urls) {
         try {
-            console.log(`📡 Trying ${api.includes('quote') ? 'Standard' : 'Global'} API for ${mint.slice(0,4)}...`);
+            console.log(`📡 Attempting Trade: ${url.includes('quote') ? 'Primary' : 'Secondary'}`);
+            const quote = await axios.get(`${url}/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${Math.floor(0.01 * LAMPORTS_PER_SOL)}&slippageBps=5000`, { timeout: 5000 });
             
-            const quoteRes = await axios.get(`${api}/quote?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${Math.floor(0.01 * LAMPORTS_PER_SOL)}&slippageBps=5000`, { timeout: 5000 });
-            
-            const swapRes = await axios.post(`${api}/swap`, {
-                quoteResponse: quoteRes.data,
+            const swap = await axios.post(`${url}/swap`, {
+                quoteResponse: quote.data,
                 userPublicKey: wallet.publicKey.toBase58(),
                 wrapAndUnwrapSol: true,
-                prioritizationFeeLamports: 400000 // 🚀 2026 Gas - Must be high to land
-            }, { timeout: 8000 });
+                prioritizationFeeLamports: 500000 // 🚀 Max Priority
+            }, { timeout: 5000 });
 
-            const tx = VersionedTransaction.deserialize(Buffer.from(swapRes.data.swapTransaction, 'base64'));
+            const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
             tx.sign([wallet]);
             const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
             
-            const success = `✅ BOUGHT! https://solscan.io/tx/${sig}`;
-            console.log(success);
-            if (process.env.CHAT_ID) bot.sendMessage(process.env.CHAT_ID, success);
-            return; // Exit if successful
-
+            if (MY_ID) bot.sendMessage(MY_ID, `✅ LANDED: https://solscan.io/tx/${sig}`);
+            console.log("🔥 SUCCESS");
+            return;
         } catch (e) {
-            const msg = e.response?.data?.error || e.message;
-            console.log(`❌ ${api.slice(8, 15)} Failed: ${msg}`);
-            // If it's a 429 or 401, the loop will try the next endpoint
+            console.log(`❌ Path failed: ${e.message}`);
         }
     }
 }
 
-// 3. THE SCANNER
+// 🛡️ THE MEMORY-GUARDED SCANNER
 async function toggleScanning(on) {
     if (!on) {
         for (let id of subIds) await connection.removeOnLogsListener(id).catch(() => {});
@@ -65,26 +59,21 @@ async function toggleScanning(on) {
                 if (isWorking || err || !logs.some(l => l.toLowerCase().includes("init"))) return;
 
                 isWorking = true;
-                await toggleScanning(false); 
+                await toggleScanning(false); // Disconnect to save RAM
 
-                console.log(`🎯 TARGET: ${signature.slice(0, 8)}`);
                 try {
                     const tx = await connection.getParsedTransaction(signature, { maxSupportedTransactionVersion: 0, commitment: 'confirmed' });
                     if (tx) {
-                        const accounts = tx.transaction.message.accountKeys.map(k => k.pubkey.toBase58());
-                        const mint = accounts.find(addr => 
-                            addr !== SOL_MINT && addr !== pId.toBase58() && addr !== wallet.publicKey.toBase58() && 
-                            !addr.startsWith('1111') && !addr.startsWith('Tokenkeg')
-                        );
-                        
+                        const accs = tx.transaction.message.accountKeys.map(k => k.pubkey.toBase58());
+                        const mint = accs.find(a => a !== SOL_MINT && a !== pId.toBase58() && a !== wallet.publicKey.toBase58() && !a.startsWith('1111') && !a.startsWith('Tokenkeg'));
                         if (mint) {
-                            console.log(`✅ VERIFIED: ${mint.slice(0, 4)}`);
+                            console.log(`🎯 TARGET: ${mint}`);
                             await buyToken(mint);
                         }
                     }
-                } catch (e) { console.log("🚨 Scan Error"); }
+                } catch (e) { }
 
-                console.log("⏳ 45s Cooldown...");
+                console.log("⏳ Cooling Down...");
                 setTimeout(() => { isWorking = false; toggleScanning(true); }, 45000);
             }, 'processed');
             subIds.push(id);
@@ -92,5 +81,11 @@ async function toggleScanning(on) {
     }
 }
 
-console.log("🚀 UNIVERSAL APEX V3 ONLINE.");
+process.on('uncaughtException', (err) => { 
+    console.log('🛡️ Guard:', err.message); 
+    isWorking = false; 
+    toggleScanning(true); 
+});
+
+console.log("🚀 SLEDGEHAMMER APEX ONLINE. SLEEP NOW.");
 toggleScanning(true);
