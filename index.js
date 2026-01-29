@@ -12,40 +12,36 @@ const MY_ID = process.env.CHAT_ID;
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const JUP_IP = "https://74.125.22.103"; 
-const JUP_DNS = "https://quote-api.jup.ag"; // 🌐 Fallback path
+const JUP_DNS = "https://quote-api.jup.ag";
 const agent = new https.Agent({ rejectUnauthorized: false });
 
 let isWorking = false;
 let subIds = [];
 
-// 🎯 WATCHDOG (+50% / -30%)
+// 🎯 WATCHDOG (TP/SL)
 async function monitorPrice(mint, entryPrice, tokens) {
     const interval = setInterval(async () => {
         try {
-            // Try IP first, then DNS
             let res;
             try {
                 res = await axios.get(`${JUP_IP}/v6/quote?inputMint=${mint}&outputMint=${SOL_MINT}&amount=${tokens}&slippageBps=100`, { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent });
             } catch (e) {
                 res = await axios.get(`${JUP_DNS}/v6/quote?inputMint=${mint}&outputMint=${SOL_MINT}&amount=${tokens}&slippageBps=100`);
             }
-            
             const currentPrice = parseFloat(res.data.outAmount) / tokens;
             if (currentPrice >= entryPrice * 1.5 || currentPrice <= entryPrice * 0.7) {
                 clearInterval(interval);
-                const swapData = { quoteResponse: res.data, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 300000, dynamicComputeUnitLimit: true };
-                const swap = await axios.post(`${JUP_DNS}/v6/swap`, swapData).catch(() => axios.post(`${JUP_IP}/v6/swap`, swapData, { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent }));
-                
+                const swap = await axios.post(`${JUP_DNS}/v6/swap`, { quoteResponse: res.data, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 300000, dynamicComputeUnitLimit: true });
                 const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
                 tx.sign([wallet]);
                 await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
-                bot.sendMessage(MY_ID, `🎯 AUTO-SELL: ${currentPrice >= entryPrice * 1.5 ? "PROFIT" : "LOSS"}`);
+                bot.sendMessage(MY_ID, `🎯 AUTO-SELL: ${currentPrice >= entryPrice * 1.5 ? "TAKE PROFIT 🚀" : "STOP LOSS 📉"}`);
             }
         } catch (e) { }
     }, 30000); 
 }
 
-// 🚀 THE V11 BUYER (Dual-Path Execution)
+// 🚀 THE RELENTLESS BUYER (No Manual Fallback)
 async function buyToken(mint) {
     try {
         console.log(`🛡️ Vetting: ${mint}`);
@@ -55,39 +51,44 @@ async function buyToken(mint) {
         const amount = Math.floor(0.01 * LAMPORTS_PER_SOL);
         let quote = null;
 
-        for (let i = 0; i < 10; i++) { 
+        // 🔥 RELENTLESS RETRY (Up to 4 Minutes)
+        for (let i = 0; i < 80; i++) { 
             try {
-                // Dual-Path Quote Attempt
                 const url = i % 2 === 0 ? `${JUP_IP}/v6/quote` : `${JUP_DNS}/v6/quote`;
                 const config = i % 2 === 0 ? { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent } : {};
+                // Increase slippage over time to force the trade
+                const currentSlippage = i > 40 ? 4000 : 2500; 
                 
-                const res = await axios.get(`${url}?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=2000`, config);
+                const res = await axios.get(`${url}?inputMint=${SOL_MINT}&outputMint=${mint}&amount=${amount}&slippageBps=${currentSlippage}`, config);
                 quote = res.data;
                 break; 
             } catch (e) { 
-                console.log(`🔄 Indexing... (${i+1}/10)`);
+                if (i % 10 === 0) console.log(`⏳ Auto-Hunting... (${i}/80)`);
                 await new Promise(r => setTimeout(r, 3000)); 
             }
         }
 
-        if (!quote) throw new Error("Jupiter 404/Timeout");
+        if (!quote) throw new Error("Coin never became tradable on Jupiter.");
 
-        // Dual-Path Swap Attempt
-        let swap;
-        try {
-            swap = await axios.post(`${JUP_DNS}/v6/swap`, { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 900000, dynamicComputeUnitLimit: true });
-        } catch (e) {
-            swap = await axios.post(`${JUP_IP}/v6/swap`, { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 900000, dynamicComputeUnitLimit: true }, { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent });
-        }
+        console.log("🔥 Execute: Final Buy Sequence");
+        const swap = await axios.post(`${JUP_DNS}/v6/swap`, { 
+            quoteResponse: quote, 
+            userPublicKey: wallet.publicKey.toBase58(), 
+            wrapAndUnwrapSol: true, 
+            prioritizationFeeLamports: 1000000, // Max Priority
+            dynamicComputeUnitLimit: true 
+        }).catch(() => axios.post(`${JUP_IP}/v6/swap`, { quoteResponse: quote, userPublicKey: wallet.publicKey.toBase58(), wrapAndUnwrapSol: true, prioritizationFeeLamports: 1000000, dynamicComputeUnitLimit: true }, { headers: { 'Host': 'quote-api.jup.ag' }, httpsAgent: agent }));
 
         const tx = VersionedTransaction.deserialize(Buffer.from(swap.data.swapTransaction, 'base64'));
         tx.sign([wallet]);
         const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: true });
         
-        bot.sendMessage(MY_ID, `💎 SNIPE LANDED! https://solscan.io/tx/${sig}`);
+        bot.sendMessage(MY_ID, `💎 AUTO-SNIPE SUCCESS!\nhttps://solscan.io/tx/${sig}`);
         monitorPrice(mint, amount / parseFloat(quote.outAmount), quote.outAmount);
         
-    } catch (e) { console.log(`🚨 Buy Fail: ${e.message}`); }
+    } catch (e) { 
+        console.log(`🚨 Status: ${e.message}`); 
+    }
 }
 
 async function toggleScanning(on) {
@@ -118,5 +119,5 @@ async function toggleScanning(on) {
 
 process.on('uncaughtException', () => { isWorking = false; toggleScanning(true); });
 
-console.log("🚀 V11 FINAL: DUAL-PATH ACTIVE. GO TO SLEEP.");
+console.log("🚀 V13 RELENTLESS AUTO-SNIPER ONLINE.");
 toggleScanning(true);
